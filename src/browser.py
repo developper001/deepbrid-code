@@ -354,30 +354,43 @@ class DeepbridChatBrowser:
                     f"{path.name} exceeds the {MAX_IMAGE_ATTACHMENT_BYTES // (1024 * 1024)} MiB image limit."
                 )
             resolved_paths.append(resolved_path)
-        document = self._send_command(websocket_url, "DOM.getDocument", {"depth": -1})
-        root = document.get("root") if isinstance(document, dict) else None
-        root_id = root.get("nodeId") if isinstance(root, dict) else None
-        if not isinstance(root_id, int):
-            raise BrowserLaunchError("Could not access the Deepbrid AI Chat attachment control.")
-        query = self._send_command(
-            websocket_url,
-            "DOM.querySelector",
-            {"nodeId": root_id, "selector": 'input[type="file"][accept*="image/"]'},
-        )
-        node_id = query.get("nodeId") if isinstance(query, dict) else None
-        if not isinstance(node_id, int) or node_id == 0:
-            raise BrowserLaunchError(
-                "Deepbrid AI Chat no longer exposes its image attachment control. "
-                "Attach images manually in Chrome."
+        connection = self._open_devtools_connection(websocket_url)
+        try:
+            document = self._send_command_on_connection(
+                connection,
+                "DOM.getDocument",
+                {"depth": -1},
+                command_id=1,
             )
-        self._send_command(
-            websocket_url,
-            "DOM.setFileInputFiles",
-            {
-                "nodeId": node_id,
-                "files": [str(path) for path in resolved_paths],
-            },
-        )
+            root = document.get("root")
+            root_id = root.get("nodeId") if isinstance(root, dict) else None
+            if not isinstance(root_id, int):
+                raise BrowserLaunchError(
+                    "Could not access the Deepbrid AI Chat attachment control."
+                )
+            query = self._send_command_on_connection(
+                connection,
+                "DOM.querySelector",
+                {"nodeId": root_id, "selector": 'input[type="file"][accept*="image/"]'},
+                command_id=2,
+            )
+            node_id = query.get("nodeId")
+            if not isinstance(node_id, int) or node_id == 0:
+                raise BrowserLaunchError(
+                    "Deepbrid AI Chat no longer exposes its image attachment control. "
+                    "Attach images manually in Chrome."
+                )
+            self._send_command_on_connection(
+                connection,
+                "DOM.setFileInputFiles",
+                {
+                    "nodeId": node_id,
+                    "files": [str(path) for path in resolved_paths],
+                },
+                command_id=3,
+            )
+        finally:
+            self._close_devtools_connection(connection)
 
     def _evaluate(self, websocket_url: str, expression: str) -> object:
         result = self._send_command(
@@ -399,23 +412,44 @@ class DeepbridChatBrowser:
 
     @staticmethod
     def _send_command(websocket_url: str, method: str, params: dict[str, object]) -> dict[str, object]:
+        connection = DeepbridChatBrowser._open_devtools_connection(websocket_url)
+        try:
+            return DeepbridChatBrowser._send_command_on_connection(
+                connection,
+                method,
+                params,
+                command_id=1,
+            )
+        finally:
+            DeepbridChatBrowser._close_devtools_connection(connection)
+
+    @staticmethod
+    def _open_devtools_connection(websocket_url: str) -> websocket.WebSocket:
         parsed = urllib.parse.urlparse(websocket_url)
         if parsed.scheme != "ws" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise BrowserLaunchError("Refusing a non-local Chrome DevTools connection.")
         try:
-            connection = websocket.create_connection(
+            return websocket.create_connection(
                 websocket_url,
                 timeout=DEBUGGER_TIMEOUT,
                 suppress_origin=True,
             )
         except (OSError, websocket.WebSocketException) as error:
             raise BrowserLaunchError(f"Could not connect to the dedicated Chrome page: {error}") from error
+
+    @staticmethod
+    def _send_command_on_connection(
+        connection: websocket.WebSocket,
+        method: str,
+        params: dict[str, object],
+        command_id: int,
+    ) -> dict[str, object]:
         try:
-            connection.send(json.dumps({"id": 1, "method": method, "params": params}))
+            connection.send(json.dumps({"id": command_id, "method": method, "params": params}))
             deadline = time.monotonic() + DEBUGGER_TIMEOUT
             while time.monotonic() < deadline:
                 message = json.loads(connection.recv())
-                if not isinstance(message, dict) or message.get("id") != 1:
+                if not isinstance(message, dict) or message.get("id") != command_id:
                     continue
                 if "error" in message:
                     detail = message["error"]
@@ -429,11 +463,13 @@ class DeepbridChatBrowser:
             raise BrowserLaunchError(f"Chrome DevTools {method} timed out.")
         except (OSError, websocket.WebSocketException, json.JSONDecodeError) as error:
             raise BrowserLaunchError(f"Chrome DevTools {method} failed: {error}") from error
-        finally:
-            try:
-                connection.close()
-            except (OSError, websocket.WebSocketException):
-                pass
+
+    @staticmethod
+    def _close_devtools_connection(connection: websocket.WebSocket) -> None:
+        try:
+            connection.close()
+        except (OSError, websocket.WebSocketException):
+            pass
 
     @staticmethod
     def _submit_script(prompt: str) -> str:
