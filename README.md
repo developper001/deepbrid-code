@@ -4,6 +4,8 @@ Deepbrid Code is a local-first Windows coding-assistant shell built with Python
 and Tkinter. It can open a project folder, preview text files and images, and
 prepare selected context for use in Deepbrid AI Chat.
 
+![Deepbrid Code showing the project explorer, file preview, and AI chat](src\img\screenshots\DeepbridCode.png)
+
 ## Run
 
 Requires Python 3.11 or newer with Tkinter available:
