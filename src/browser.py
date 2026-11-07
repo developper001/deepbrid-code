@@ -382,8 +382,11 @@ class DeepbridChatBrowser:
             isinstance(name, str) for name in initial_names
         ):
             raise BrowserLaunchError("Deepbrid AI Chat returned invalid attachment state.")
-        expected_names = Counter(initial_names)
-        expected_names.update(path.name for path in resolved_paths)
+        initial_name_counts = Counter(initial_names)
+        requested_name_counts = Counter(path.name for path in resolved_paths)
+        expected_names = initial_name_counts.copy()
+        for name, count in requested_name_counts.items():
+            expected_names[name] = max(expected_names[name], count)
         connection = self._open_devtools_connection(websocket_url)
         try:
             document = self._send_command_on_connection(

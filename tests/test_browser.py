@@ -54,7 +54,7 @@ class BrowserImageUploadTests(unittest.TestCase):
                     browser,
                     "_evaluate",
                     side_effect=[
-                        {"readyNames": []},
+                        {"readyNames": ["screenshot.png"]},
                         {"readyNames": ["screenshot.png"], "failedNames": []},
                     ],
                 ) as evaluate,
