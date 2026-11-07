@@ -76,6 +76,7 @@ class DeepbridCodeApp:
         self.console_history: deque[str] = deque(maxlen=2000)
         self.console_output: tk.Text | None = None
         self.console_visible = False
+        self.console_sash_position: int | None = None
         self._log_lock = threading.Lock()
         self._previous_callback_exception = self.root.report_callback_exception
         self._poll_after_id: str | None = None
@@ -452,19 +453,26 @@ class DeepbridCodeApp:
 
     def _toggle_console(self) -> None:
         if self.console_visible:
+            height = self.workspace.winfo_height()
+            sash_position = self.workspace.sashpos(0)
+            if height > 1 and sash_position > 0:
+                self.console_sash_position = sash_position
             self._close_console()
             return
         self.workspace.add(self.console_panel, weight=1)
         self.console_visible = True
-        self.root.after_idle(self._size_console_pane)
+        self.root.after_idle(self._restore_console_pane)
         self._poll_console_events()
 
-    def _size_console_pane(self) -> None:
+    def _restore_console_pane(self) -> None:
         if not self.console_visible:
             return
         height = self.workspace.winfo_height()
-        if height > 300:
-            self.workspace.sashpos(0, height - 220)
+        if height <= 1:
+            return
+        if self.console_sash_position is None:
+            self.console_sash_position = round(height * 2 / 3)
+        self.workspace.sashpos(0, self.console_sash_position)
 
     def _close_console(self) -> None:
         if self.console_visible:

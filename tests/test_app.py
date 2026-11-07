@@ -539,6 +539,45 @@ class AppStartupTests(unittest.TestCase):
             finally:
                 root.destroy()
 
+    def test_console_defaults_to_one_third_and_remembers_resized_height(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    with (
+                        patch.object(app.root, "after_idle") as after_idle,
+                        patch.object(app.workspace, "winfo_height", return_value=900),
+                        patch.object(app.workspace, "sashpos") as set_sash,
+                    ):
+                        app._toggle_console()
+                        after_idle.assert_called_once()
+                        app._restore_console_pane()
+                        set_sash.assert_called_with(0, 600)
+
+                    with (
+                        patch.object(app.workspace, "winfo_height", return_value=900),
+                        patch.object(app.workspace, "sashpos", return_value=500),
+                    ):
+                        app._toggle_console()
+                    self.assertEqual(app.console_sash_position, 500)
+
+                    with (
+                        patch.object(app.root, "after_idle"),
+                        patch.object(app.workspace, "winfo_height", return_value=900),
+                        patch.object(app.workspace, "sashpos") as set_sash,
+                    ):
+                        app._toggle_console()
+                        app._restore_console_pane()
+                    set_sash.assert_called_with(0, 500)
+            finally:
+                root.destroy()
+
     def test_enter_sends_and_control_enter_inserts_newline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root_path = Path(temporary_directory)
