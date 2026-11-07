@@ -75,6 +75,11 @@ class AppStartupTests(unittest.TestCase):
                 ):
                     app = DeepbridCodeApp(root)
                     self.assertTrue(app.dark_theme)
+                    self.assertEqual((app.logo_image.width(), app.logo_image.height()), (48, 48))
+                    self.assertEqual(
+                        [icon.width() for icon in app.window_icons],
+                        [16, 32, 48],
+                    )
                     self.assertEqual(app.preview.cget("background"), "#171c19")
                     self.assertFalse(app.progress.winfo_manager())
 
@@ -113,6 +118,57 @@ class AppStartupTests(unittest.TestCase):
                     app.file_context_menu.invoke(0)
                     self.assertEqual(len(app.context_files), 1)
                     self.assertIn("main.py (text)", app.context_list.get(0))
+                    self.assertIn("Added main.py", app.status.get())
+            finally:
+                root.destroy()
+
+    def test_add_context_button_includes_the_selected_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            project = root_path / "project"
+            project.mkdir()
+            (project / "main.py").write_text("print('hello')", encoding="utf-8")
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app._load_project(project)
+                    app.file_tree.selection_set("f:main.py")
+                    app.add_context_button.invoke()
+
+                    self.assertEqual(len(app.context_files), 1)
+                    self.assertEqual(app.context_list.size(), 1)
+                    self.assertIn("main.py (text)", app.context_list.get(0))
+                    self.assertIn("Added main.py", app.status.get())
+            finally:
+                root.destroy()
+
+    def test_add_context_button_explains_that_folders_are_not_context_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            project = root_path / "project"
+            source = project / "src"
+            source.mkdir(parents=True)
+            (source / "main.py").write_text("print('hello')", encoding="utf-8")
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app._load_project(project)
+                    app.file_tree.selection_set("d:src")
+                    app.add_context_button.invoke()
+
+                    self.assertEqual(len(app.context_files), 0)
+                    self.assertIn("src (folder)", app.status.get())
+                    self.assertIn("Skipped unsupported item", app.status.get())
             finally:
                 root.destroy()
 

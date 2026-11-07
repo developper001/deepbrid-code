@@ -41,6 +41,7 @@ class DeepbridCodeApp:
         self.context_files: dict[str, ContextFile] = {}
         self.context_order: list[str] = []
         self.preview_image: tk.PhotoImage | None = None
+        self.window_icons: tuple[tk.PhotoImage, ...] = ()
         self.chat_browser = DeepbridChatBrowser(APP_DATA_DIR / "chrome-profile")
         self.chat_events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.chat_request_active = False
@@ -54,8 +55,8 @@ class DeepbridCodeApp:
     def _build_ui(self) -> None:
         toolbar = ttk.Frame(self.root, padding=8)
         toolbar.pack(fill="x")
-        self.logo_image = create_brand_icon(self.root, self.dark_theme)
-        self.root.iconphoto(True, self.logo_image)
+        self.logo_image = create_brand_icon(self.root, self.dark_theme, 48)
+        self._set_window_icons()
         self.logo_label = ttk.Label(toolbar, image=self.logo_image)
         self.logo_label.pack(side="left", padx=(0, 8))
         ttk.Button(toolbar, text="Open folder...", command=self._open_folder).pack(side="left")
@@ -89,7 +90,12 @@ class DeepbridCodeApp:
             label="Add selected to context",
             command=self._add_context,
         )
-        ttk.Button(files_panel, text="Add selected to context", command=self._add_context).pack(
+        self.add_context_button = ttk.Button(
+            files_panel,
+            text="Add selected to context",
+            command=self._add_context,
+        )
+        self.add_context_button.pack(
             fill="x", pady=(6, 0)
         )
 
@@ -117,9 +123,6 @@ class DeepbridCodeApp:
         self.message.pack(fill="both", expand=True, pady=(4, 6))
         actions = ttk.Frame(context_panel)
         actions.pack(fill="x")
-        ttk.Button(actions, text="Copy prompt for Deepbrid AI Chat", command=self._copy_prompt).pack(
-            fill="x"
-        )
         ttk.Button(actions, text="Send to Deepbrid AI Chat", command=self._send).pack(
             fill="x", pady=(4, 0)
         )
@@ -335,13 +338,20 @@ class DeepbridCodeApp:
             activebackground=colors["selection"],
             activeforeground=colors["foreground"],
         )
-        self.logo_image = create_brand_icon(self.root, self.dark_theme)
+        self.logo_image = create_brand_icon(self.root, self.dark_theme, 48)
         self.logo_label.configure(image=self.logo_image)
-        self.root.iconphoto(True, self.logo_image)
+        self._set_window_icons()
+
+    def _set_window_icons(self) -> None:
+        self.window_icons = tuple(
+            create_brand_icon(self.root, self.dark_theme, size)
+            for size in (16, 32, 48)
+        )
+        self.root.iconphoto(True, *self.window_icons)
 
     def _show_file_context_menu(self, event: tk.Event) -> str:
         row = self.file_tree.identify_row(event.y)
-        if not row:
+        if not row or row not in self.tree_paths:
             return "break"
         if row not in self.file_tree.selection():
             self.file_tree.selection_set(row)
@@ -408,29 +418,57 @@ class DeepbridCodeApp:
         if not selected_items:
             self.status.set("Select one or more supported files to add context.")
             return
+        added: list[str] = []
         skipped: list[str] = []
+        errors: list[str] = []
         for iid in selected_items:
             path = self.tree_paths.get(iid)
             if path is None:
+                skipped.append(f"{self.file_tree.item(iid, 'text')} (folder)")
                 continue
             kind = context_kind(path)
             if kind is None:
                 skipped.append(path.name)
                 continue
-            key = str(path)
-            if key not in self.context_files:
-                self.context_files[key] = ContextFile(path, kind)
-                self.context_order.append(key)
-                self.context_list.insert("end", f"{path.relative_to(self.project_root)} ({kind})")
+            try:
+                if path.is_symlink():
+                    raise ValueError(f"{path.name} became a symbolic link.")
+                resolved_path = path.resolve(strict=True)
+                relative_path = resolved_path.relative_to(self.project_root)
+            except (OSError, RuntimeError, ValueError) as error:
+                errors.append(f"{path.name}: {error}")
+                continue
+            key = str(resolved_path)
+            if key in self.context_files:
+                continue
+            self.context_files[key] = ContextFile(resolved_path, kind)
+            self.context_order.append(key)
+            self.context_list.insert("end", f"{relative_path} ({kind})")
+            added.append(path.name)
+        if added:
+            last_added = len(self.context_order) - 1
+            self.context_list.selection_clear(0, "end")
+            self.context_list.selection_set(last_added)
+            self.context_list.see(last_added)
+            self.context_list.update_idletasks()
+        messages: list[str] = []
+        if added:
+            messages.append(
+                f"Added {', '.join(added)} to included context "
+                f"({len(self.context_files)} item(s) total)."
+            )
         if skipped:
-            self.status.set(
-                f"Skipped unsupported file(s): {', '.join(skipped)}. "
-                f"{len(self.context_files)} context item(s) selected."
+            messages.append(
+                f"Skipped unsupported item(s): {', '.join(skipped)}."
             )
-        else:
-            self.status.set(
-                f"{len(self.context_files)} context item(s) selected."
+        if errors:
+            messages.append(f"Could not add file(s): {'; '.join(errors)}")
+        if not messages:
+            messages.append(
+                f"Selected file(s) already included. "
+                f"{len(self.context_files)} context item(s) total."
             )
+        self.status.set(" ".join(messages))
 
     def _remove_context(self) -> None:
         selected = list(self.context_list.curselection())
@@ -438,31 +476,7 @@ class DeepbridCodeApp:
             key = self.context_order.pop(index)
             self.context_files.pop(key, None)
             self.context_list.delete(index)
-        self.status.set(f"{len(self.context_files)} context item(s) selected.")
-
-    def _copy_prompt(self) -> None:
-        try:
-            prompt = build_prompt(
-                self.message.get("1.0", "end-1c"),
-                list(self.context_files.values()),
-                self.project_root,
-            )
-        except (OSError, ValueError) as error:
-            self.status.set(f"Could not prepare prompt: {error}")
-            return
-        if not prompt:
-            self.status.set("Add a message or context before copying.")
-            return
-        try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(prompt)
-        except tk.TclError as error:
-            self.status.set(f"Could not copy prompt to the clipboard: {error}")
-            return
-        self.status.set(
-            "Prompt copied to clipboard. Paste it yourself in Deepbrid AI Chat; "
-            "attach the selected images there manually."
-        )
+        self.status.set(f"{len(self.context_files)} context item(s) included.")
 
     def _send(self) -> None:
         if self.chat_request_active:

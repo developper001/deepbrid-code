@@ -38,8 +38,7 @@ immediately submits the message and explicitly selected context through the
 visible chat UI; selected images are attached through the site's file-upload
 control. The app shows a busy indicator while waiting and displays either the
 rendered response or an error/timeout in the conversation and status bar.
-**Copy prompt for Deepbrid AI Chat** remains available for manual use. If
-Chrome is installed in a non-standard location, set
+If Chrome is installed in a non-standard location, set
 `DEEPBRID_CHROME_PATH` to its executable before launching the app.
 The progress bar is shown only while Chrome is opening or a chat request is in
 progress.
@@ -76,16 +75,14 @@ attached by the app.
 3. To exclude an item, select it in **Included context** and click
    **Remove selected context**.
 4. Enter your question in **Message**, then choose **Send to Deepbrid AI Chat**
-   to send the message and listed context, or **Copy prompt for Deepbrid AI
-   Chat** to copy the text prompt for manual use.
+   to send the message and listed context.
 
-Included context is kept locally in the app until you send or copy a prompt.
+Included context is kept locally in the app until you send a prompt.
 When sent, selected text is included with its file path and contents, and
 selected images are attached through the chat page's file-upload control.
-Copying a prompt includes text context; attach any selected images manually in
-the browser. The context list is not cleared after sending, so you can reuse or
-remove items for later messages. Review the list before sending, especially
-for secrets; see the per-file and total text limits above.
+The context list is not cleared after sending, so you can reuse or remove items
+for later messages. Review the list before sending, especially for secrets;
+see the per-file and total text limits above.
 
 ## Preferences
 
