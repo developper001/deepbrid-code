@@ -159,7 +159,7 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(calls[0].args[1], "DOM.getDocument")
         self.assertEqual(calls[1].args[2]["selector"], 'input[type="file"][accept*="image/"]')
         self.assertEqual(calls[2].args[1], "DOM.setFileInputFiles")
-        self.assertEqual(calls[2].args[2]["files"], [str(image)])
+        self.assertEqual(calls[2].args[2]["files"], [str(image.resolve())])
 
     def test_devtools_refuses_non_loopback_connection(self) -> None:
         with self.assertRaisesRegex(BrowserLaunchError, "non-local Chrome DevTools"):
