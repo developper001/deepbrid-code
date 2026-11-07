@@ -551,12 +551,12 @@ class AppStartupTests(unittest.TestCase):
                 ):
                     app = DeepbridCodeApp(root)
                     with (
-                        patch.object(app.root, "after_idle") as after_idle,
+                        patch.object(app.root, "after", return_value="console-after-id") as after,
                         patch.object(app.workspace, "winfo_height", return_value=900),
                         patch.object(app.workspace, "sashpos") as set_sash,
                     ):
                         app._toggle_console()
-                        after_idle.assert_called_once()
+                        after.assert_called_once_with(50, app._restore_console_pane)
                         app._restore_console_pane()
                         set_sash.assert_called_with(0, 600)
 
@@ -568,7 +568,7 @@ class AppStartupTests(unittest.TestCase):
                     self.assertEqual(app.console_sash_position, 500)
 
                     with (
-                        patch.object(app.root, "after_idle"),
+                        patch.object(app.root, "after"),
                         patch.object(app.workspace, "winfo_height", return_value=900),
                         patch.object(app.workspace, "sashpos") as set_sash,
                     ):

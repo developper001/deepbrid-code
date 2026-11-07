@@ -461,12 +461,13 @@ class DeepbridCodeApp:
             return
         self.workspace.add(self.console_panel, weight=1)
         self.console_visible = True
-        self.root.after_idle(self._restore_console_pane)
+        self.root.after(50, self._restore_console_pane)
         self._poll_console_events()
 
     def _restore_console_pane(self) -> None:
         if not self.console_visible:
             return
+        self.workspace.update_idletasks()
         height = self.workspace.winfo_height()
         if height <= 1:
             return
