@@ -71,15 +71,16 @@ attached by the app.
 2. Right-click a file and choose **Add selected to context**. The app checks
    file contents rather than relying on the extension: text files such as
    `LICENSE` are included, recognized images are attached as images, and binary
-   files are refused. Right-click a directory and choose
-   **Add text files in directory to context** to include its recursively found
-   text files; non-text files are checked and ignored. Added files are marked
+   files are refused. Right-click a directory or selected files and folders
+   and choose **Add selected to context** to include eligible selected files
+   and recursively found text files; non-text files are checked and ignored.
+   Added files are marked
    with `*` in the project tree. Selecting or previewing a file alone does not
    include or send it.
-3. Right-click a marked file and choose **Remove selected from context** to
-   exclude it. Right-click a directory and choose
-   **Remove directory contents from context** to exclude all included files
-   beneath it.
+3. Right-click a marked file or selected folder(s) and choose
+   **Remove selected from context** to exclude the selected files and all
+   included files beneath the selected folders. This option appears only when
+   the selection contains context.
 4. Enter your question in **Message** and choose **Send**, or press Enter to
    send the message and listed context. Use Ctrl+Enter to insert a newline.
 

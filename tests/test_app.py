@@ -188,6 +188,11 @@ class AppStartupTests(unittest.TestCase):
                         patch.object(app.file_context_menu, "tk_popup"),
                     ):
                         app._show_file_context_menu(event)
+                    self.assertEqual(app.file_context_menu.index("end"), 0)
+                    self.assertEqual(
+                        app.file_context_menu.entrycget(0, "label"),
+                        "Add selected to context",
+                    )
                     app.file_context_menu.invoke(0)
 
                     self.assertEqual(len(app.context_files), 1)
@@ -199,6 +204,11 @@ class AppStartupTests(unittest.TestCase):
                         patch.object(app.file_context_menu, "tk_popup"),
                     ):
                         app._show_file_context_menu(event)
+                    self.assertEqual(app.file_context_menu.index("end"), 1)
+                    self.assertEqual(
+                        app.file_context_menu.entrycget(1, "label"),
+                        "Remove selected from context",
+                    )
                     app.file_context_menu.invoke(1)
                     self.assertEqual(len(app.context_files), 0)
                     self.assertEqual(app.file_tree.item("f:main.py", "text"), "main.py")
@@ -247,9 +257,59 @@ class AppStartupTests(unittest.TestCase):
                         patch.object(app.file_context_menu, "tk_popup"),
                     ):
                         app._show_file_context_menu(event)
-                    app.file_context_menu.invoke(2)
+                    self.assertEqual(app.file_context_menu.index("end"), 1)
+                    app.file_context_menu.invoke(1)
                     self.assertFalse(app.context_files)
                     self.assertEqual(app.file_tree.item("f:src/main.py", "text"), "main.py")
+            finally:
+                root.destroy()
+
+    def test_selected_folders_share_add_and_remove_context_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            project = root_path / "project"
+            first = project / "first"
+            second = project / "second"
+            first.mkdir(parents=True)
+            second.mkdir()
+            (first / "one.py").write_text("one", encoding="utf-8")
+            (first / "two.txt").write_text("two", encoding="utf-8")
+            (second / "three.md").write_text("three", encoding="utf-8")
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app._load_project(project)
+                    first_row = "d:first"
+                    second_row = "d:second"
+                    app.file_tree.selection_set(first_row, second_row)
+                    event = SimpleNamespace(y=10, x_root=20, y_root=30)
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=first_row),
+                        patch.object(app.file_context_menu, "tk_popup"),
+                    ):
+                        app._show_file_context_menu(event)
+                    self.assertEqual(app.file_context_menu.index("end"), 0)
+                    app.file_context_menu.invoke(0)
+                    self.assertEqual(len(app.context_files), 3)
+
+                    app.file_tree.selection_set(first_row, second_row)
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=first_row),
+                        patch.object(app.file_context_menu, "tk_popup"),
+                    ):
+                        app._show_file_context_menu(event)
+                    self.assertEqual(app.file_context_menu.index("end"), 1)
+                    self.assertEqual(
+                        app.file_context_menu.entrycget(1, "label"),
+                        "Remove selected from context",
+                    )
+                    app.file_context_menu.invoke(1)
+                    self.assertFalse(app.context_files)
             finally:
                 root.destroy()
 

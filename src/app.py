@@ -156,18 +156,6 @@ class DeepbridCodeApp:
         self.file_tree.bind("<<TreeviewSelect>>", self._preview_selection)
         self.file_tree.bind("<Button-3>", self._show_file_context_menu)
         self.file_context_menu = tk.Menu(self.root, tearoff=False)
-        self.file_context_menu.add_command(
-            label="Add selected to context",
-            command=self._add_context,
-        )
-        self.file_context_menu.add_command(
-            label="Remove selected from context",
-            command=self._remove_selected_context,
-        )
-        self.file_context_menu.add_command(
-            label="Remove directory contents from context",
-            command=self._remove_selected_context,
-        )
         self.pasted_images_frame = ttk.Frame(files_panel)
         self.pasted_images_frame.columnconfigure(0, weight=1)
         self.pasted_images_label = ttk.Label(self.pasted_images_frame, text="Pasted images")
@@ -684,43 +672,42 @@ class DeepbridCodeApp:
         if row not in self.file_tree.selection():
             self.file_tree.selection_set(row)
             self.file_tree.focus(row)
-        if row in self.tree_directories:
-            directory = self.tree_directories[row]
-            has_directory_context = any(
-                self._is_context_under_directory(item, directory)
-                for item in self.context_files.values()
+        selected_rows = set(self.file_tree.selection())
+        has_selected_context = bool(self._context_keys_for_project_rows(selected_rows))
+        self.file_context_menu.delete(0, "end")
+        self.file_context_menu.add_command(
+            label="Add selected to context",
+            command=self._add_context,
+        )
+        if has_selected_context:
+            self.file_context_menu.add_command(
+                label="Remove selected from context",
+                command=self._remove_selected_context,
             )
-            self.file_context_menu.entryconfigure(
-                0,
-                label="Add text files in directory to context",
-                command=lambda path=directory: self._add_directory_context(path),
-                state="normal",
-            )
-            self.file_context_menu.entryconfigure(1, state="disabled")
-            self.file_context_menu.entryconfigure(
-                2,
-                command=lambda path=directory: self._remove_directory_context(path),
-                state="normal" if has_directory_context else "disabled",
-            )
-        else:
-            selected_rows = set(self.file_tree.selection())
-            has_selected_context = any(
-                tree_iid in selected_rows
-                for tree_iid in self.context_tree_iids.values()
-            )
-            self.file_context_menu.entryconfigure(
-                0,
-                label="Add selected to context",
-                command=self._add_context,
-                state="disabled" if row in self.external_context_tree_items else "normal",
-            )
-            self.file_context_menu.entryconfigure(
-                1,
-                state="normal" if has_selected_context else "disabled",
-            )
-            self.file_context_menu.entryconfigure(2, state="disabled")
         self.file_context_menu.tk_popup(event.x_root, event.y_root)
         return "break"
+
+    def _context_keys_for_project_rows(self, rows: set[str]) -> list[str]:
+        selected_files = {
+            path.resolve(strict=False)
+            for row, path in self.tree_paths.items()
+            if row in rows
+        }
+        selected_directories = [
+            path for row, path in self.tree_directories.items() if row in rows
+        ]
+        return [
+            key
+            for key, item in self.context_files.items()
+            if not item.external
+            and (
+                item.path.resolve(strict=False) in selected_files
+                or any(
+                    self._is_context_under_directory(item, directory)
+                    for directory in selected_directories
+                )
+            )
+        ]
 
     def _is_context_under_directory(self, item: ContextFile, directory: Path) -> bool:
         if item.external or self.project_root is None:
@@ -804,18 +791,19 @@ class DeepbridCodeApp:
             return
         selected_items = self.file_tree.selection()
         if not selected_items:
-            self.status.set("Select one or more supported files to add context.")
+            self.status.set("Select one or more files or folders to add context.")
             return
         candidates: list[ContextFile] = []
         skipped: list[str] = []
         errors: list[str] = []
+        directories: list[Path] = []
         for iid in selected_items:
-            if iid in self.external_context_tree_items:
-                skipped.append(self.external_context_tree_items[iid].label or "Clipboard image")
+            directory = self.tree_directories.get(iid)
+            if directory is not None:
+                directories.append(directory)
                 continue
             path = self.tree_paths.get(iid)
             if path is None:
-                skipped.append(f"{self.file_tree.item(iid, 'text')} (folder)")
                 continue
             try:
                 if path.is_symlink():
@@ -834,53 +822,38 @@ class DeepbridCodeApp:
                 errors.append(f"{path.name}: {error}")
                 continue
             candidates.append(ContextFile(resolved_path, kind, label=relative_path.as_posix()))
-        self._include_context(candidates, skipped, errors)
-
-    def _add_directory_context(self, directory: Path) -> None:
-        if self.project_root is None:
-            self.status.set("Open a project folder first.")
-            return
-        try:
-            resolved_directory = directory.resolve(strict=True)
-            relative_directory = resolved_directory.relative_to(self.project_root)
-            files = list(iter_project_files(resolved_directory))
-        except (OSError, RuntimeError, ValueError) as error:
-            self.status.set(f"Could not inspect directory {directory.name}: {error}")
-            self._log(f"Could not inspect context directory {directory}: {error}")
-            return
-
-        candidates: list[ContextFile] = []
-        errors: list[str] = []
         ignored_count = 0
-        for path in files:
+        for directory in directories:
             try:
-                kind = context_kind(path)
-                if kind != "text":
-                    ignored_count += 1
-                    continue
-                resolved_path = path.resolve(strict=True)
-                relative_path = resolved_path.relative_to(self.project_root)
+                resolved_directory = directory.resolve(strict=True)
+                relative_directory = resolved_directory.relative_to(self.project_root)
+                files = list(iter_project_files(resolved_directory))
             except (OSError, RuntimeError, ValueError) as error:
-                errors.append(f"{path.name}: {error}")
+                errors.append(f"{directory.name}: {error}")
+                self._log(f"Could not inspect context directory {directory}: {error}")
                 continue
-            candidates.append(
-                ContextFile(
-                    resolved_path,
-                    "text",
-                    label=relative_path.as_posix(),
+            for path in files:
+                try:
+                    kind = context_kind(path)
+                    if kind != "text":
+                        ignored_count += 1
+                        continue
+                    resolved_path = path.resolve(strict=True)
+                    relative_path = resolved_path.relative_to(self.project_root)
+                except (OSError, RuntimeError, ValueError) as error:
+                    errors.append(f"{path.name}: {error}")
+                    continue
+                candidates.append(
+                    ContextFile(resolved_path, "text", label=relative_path.as_posix())
                 )
+            self._log(
+                f"Added text files from directory {relative_directory.as_posix()}."
             )
-
-        skipped = []
         if ignored_count:
             skipped.append(f"Ignored {ignored_count} non-text file(s)")
         if not candidates and not skipped and not errors:
-            skipped.append(f"No files found in {relative_directory.as_posix()}")
+            skipped.append("No eligible files found in the selection")
         self._include_context(candidates, skipped, errors)
-        self._log(
-            f"Added text files from directory {relative_directory.as_posix()}: "
-            f"{len(candidates)} candidate(s), {ignored_count} non-text file(s) ignored."
-        )
 
     def _include_context(
         self,
@@ -1055,22 +1028,14 @@ class DeepbridCodeApp:
         )
 
     def _remove_selected_context(self) -> None:
-        selected = set(self.file_tree.selection()) | set(
-            self.pasted_images_tree.selection()
-        )
-        keys = [
+        selected_rows = set(self.file_tree.selection())
+        keys = self._context_keys_for_project_rows(selected_rows)
+        selected_images = set(self.pasted_images_tree.selection())
+        keys.extend(
             key
             for key, tree_iid in self.context_tree_iids.items()
-            if tree_iid in selected
-        ]
-        self._remove_context_keys(keys)
-
-    def _remove_directory_context(self, directory: Path) -> None:
-        keys = [
-            key
-            for key, item in self.context_files.items()
-            if self._is_context_under_directory(item, directory)
-        ]
+            if tree_iid in selected_images and key not in keys
+        )
         self._remove_context_keys(keys)
 
     def _remove_context_keys(self, keys: list[str]) -> None:
