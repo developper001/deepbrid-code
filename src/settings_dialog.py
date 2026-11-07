@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Protocol
 
-from .settings import AUTO_OPEN_CHROME, DARK_THEME
+from .settings import AUTO_OPEN_CHROME, DARK_THEME, WRAP_TEXT
 
 
 class SettingsBackend(Protocol):
@@ -21,10 +21,13 @@ class SettingsDialog:
         on_auto_open_changed: Callable[[bool], None],
         dark_theme: bool,
         on_dark_theme_changed: Callable[[bool], None],
+        wrap_text: bool,
+        on_wrap_text_changed: Callable[[bool], None],
     ) -> None:
         self.settings = settings
         self.on_auto_open_changed = on_auto_open_changed
         self.on_dark_theme_changed = on_dark_theme_changed
+        self.on_wrap_text_changed = on_wrap_text_changed
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Settings")
         self.dialog.geometry("640x400")
@@ -87,14 +90,21 @@ class SettingsDialog:
             pady=(0, 8),
         )
         self.dark_theme = tk.BooleanVar(master=self.dialog, value=dark_theme)
+        self.wrap_text = tk.BooleanVar(master=self.dialog, value=wrap_text)
         ttk.Checkbutton(
             content,
             text="Use dark mode",
             variable=self.dark_theme,
             command=self._save_dark_theme,
         ).grid(row=5, column=0, sticky="w")
+        ttk.Checkbutton(
+            content,
+            text="Wrap text in file preview",
+            variable=self.wrap_text,
+            command=self._save_wrap_text,
+        ).grid(row=6, column=0, sticky="w", pady=(6, 0))
         ttk.Label(content, textvariable=self.status).grid(
-            row=6,
+            row=7,
             column=0,
             sticky="w",
             pady=(12, 0),
@@ -108,6 +118,7 @@ class SettingsDialog:
         self.dialog.grab_set()
         self.saved_enabled = auto_open_chrome
         self.saved_dark_theme = dark_theme
+        self.saved_wrap_text = wrap_text
 
     def _save(self) -> None:
         enabled = self.enabled.get()
@@ -134,4 +145,16 @@ class SettingsDialog:
         self.dialog.configure(
             background="#202522" if enabled else "#f0f2f0",
         )
+        self.status.set("Saved.")
+
+    def _save_wrap_text(self) -> None:
+        enabled = self.wrap_text.get()
+        try:
+            self.settings.set_bool(WRAP_TEXT, enabled)
+        except (OSError, sqlite3.Error) as error:
+            self.wrap_text.set(self.saved_wrap_text)
+            self.status.set(f"Could not save setting: {error}")
+            return
+        self.saved_wrap_text = enabled
+        self.on_wrap_text_changed(enabled)
         self.status.set("Saved.")

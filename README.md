@@ -1,8 +1,8 @@
 # Deepbrid Code
 
-Deepbrid Code is an early, local-first Windows coding-assistant shell built with
-Python and Tkinter. It can open a project folder, preview text files and images,
-and prepare selected context for use in Deepbrid AI Chat.
+Deepbrid Code is a local-first Windows coding-assistant shell built with Python
+and Tkinter. It can open a project folder, preview text files and images, and
+prepare selected context for use in Deepbrid AI Chat.
 
 ## Run
 
@@ -69,9 +69,11 @@ attached by the app.
 1. Open a project folder. Select a file in **Project files** to preview it.
 2. Select one or more files (Ctrl-click or Shift-click for multiple selection)
    and click **Add selected to context**, or right-click a selected file and
-   choose the same command. Supported text files and images then appear in
-   **Included context**, along with their project-relative paths and types.
-   Selecting or previewing a file alone does not include or send it.
+   choose the same command. The app checks file contents rather than relying on
+   the extension: text files such as `LICENSE` are included, recognized images
+   are attached as images, and binary files are refused. Added files appear in
+   **Included context** with their project-relative paths and types. Selecting
+   or previewing a file alone does not include or send it.
 3. To exclude an item, select it in **Included context** and click
    **Remove selected context**.
 4. Enter your question in **Message**, then choose **Send to Deepbrid AI Chat**
@@ -84,6 +86,11 @@ The context list is not cleared after sending, so you can reuse or remove items
 for later messages. Review the list before sending, especially for secrets;
 see the per-file and total text limits above.
 
+You can paste a screenshot from the clipboard into the **Message** box with
+Ctrl+V. The image is added to **Included context** and attached with your next
+message; pasting does not send anything by itself. Pasted images are held in a
+temporary local folder and removed when the app closes.
+
 ## Preferences
 
 The app remembers the last project folder and reopens it next time. Both
@@ -92,6 +99,9 @@ are stored in SQLite at
 `%LOCALAPPDATA%\Deepbrid Code\settings.sqlite3`. Automatic Chrome startup is
 enabled by default and can be changed in **Settings**. Toggle **Use dark mode**
 there to switch and save the app's appearance.
+**Wrap text in file preview** is enabled by default and saved in the same
+settings database. Turn it off to use the preview's horizontal scrollbar;
+vertical and horizontal scrollbars are available in the preview.
 
 The app does not impose a separate character limit on the message field. Text
 context has a 256 KiB per-file limit and a 1 MiB total limit. Deepbrid AI Chat's

@@ -148,6 +148,7 @@ class DeepbridChatBrowser:
         prompt: str,
         image_paths: list[Path] | None = None,
         project_root: Path | None = None,
+        external_image_paths: list[Path] | None = None,
     ) -> str:
         if not prompt.strip():
             raise BrowserLaunchError("The prompt is empty; nothing was sent.")
@@ -165,11 +166,19 @@ class DeepbridChatBrowser:
                 else "Sign in to Deepbrid AI Chat in the dedicated Chrome window, then retry."
             )
         images = image_paths or []
-        if images and project_root is None:
+        try:
+            external_images = {
+                path.resolve(strict=True) for path in (external_image_paths or [])
+            }
+        except (OSError, RuntimeError) as error:
+            raise BrowserLaunchError(f"Could not access a pasted image: {error}") from error
+        if images and project_root is None and any(
+            path.resolve(strict=True) not in external_images for path in images
+        ):
             raise BrowserLaunchError(
                 "Open a project folder before attaching selected images to Deepbrid AI Chat."
             )
-        self._attach_images(websocket_url, images, project_root)
+        self._attach_images(websocket_url, images, project_root, external_images)
         state = self._evaluate(websocket_url, self._submit_script(prompt))
         if not isinstance(state, dict) or state.get("sent") is not True:
             error = state.get("error") if isinstance(state, dict) else None
@@ -308,9 +317,11 @@ class DeepbridChatBrowser:
         websocket_url: str,
         image_paths: list[Path],
         project_root: Path | None,
+        external_image_paths: set[Path] | None = None,
     ) -> None:
         if not image_paths:
             return
+        allowed_external_paths = external_image_paths or set()
         resolved_paths: list[Path] = []
         for path in image_paths:
             try:
@@ -321,7 +332,15 @@ class DeepbridChatBrowser:
                 size = path.stat().st_size
                 resolved_path = path.resolve(strict=True)
                 if project_root is not None:
-                    resolved_path.relative_to(project_root.resolve(strict=True))
+                    try:
+                        resolved_path.relative_to(project_root.resolve(strict=True))
+                    except ValueError:
+                        if resolved_path not in allowed_external_paths:
+                            raise
+                elif resolved_path not in allowed_external_paths:
+                    raise ValueError(
+                        f"Selected image {path.name} is outside the opened project folder."
+                    )
             except (OSError, RuntimeError) as error:
                 raise BrowserLaunchError(
                     f"Could not access selected image {path.name}: {error}"

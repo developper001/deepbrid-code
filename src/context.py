@@ -22,51 +22,7 @@ IGNORED_DIRECTORIES = {
     "target",
     "venv",
 }
-IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
-TEXT_EXTENSIONS = {
-    ".bat",
-    ".c",
-    ".cc",
-    ".cfg",
-    ".cpp",
-    ".cs",
-    ".css",
-    ".csv",
-    ".go",
-    ".h",
-    ".hpp",
-    ".html",
-    ".ini",
-    ".java",
-    ".js",
-    ".jsx",
-    ".json",
-    ".jsonc",
-    ".kt",
-    ".md",
-    ".mjs",
-    ".php",
-    ".ps1",
-    ".py",
-    ".rb",
-    ".rs",
-    ".rst",
-    ".sass",
-    ".scss",
-    ".sh",
-    ".sql",
-    ".svelte",
-    ".swift",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".txt",
-    ".vue",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
-SPECIAL_TEXT_NAMES = {".gitignore", ".dockerignore", "dockerfile", "makefile"}
+TEXT_PROBE_BYTES = 8192
 MAX_CONTEXT_FILE_BYTES = 256 * 1024
 MAX_CONTEXT_TOTAL_BYTES = 1024 * 1024
 
@@ -75,14 +31,36 @@ MAX_CONTEXT_TOTAL_BYTES = 1024 * 1024
 class ContextFile:
     path: Path
     kind: str
+    external: bool = False
+    label: str | None = None
 
 
 def context_kind(path: Path) -> str | None:
-    if path.suffix.lower() in IMAGE_EXTENSIONS:
+    if path.is_symlink():
+        raise ValueError(f"{path.name} is a symbolic link and cannot be inspected as context.")
+    with path.open("rb") as file:
+        prefix = file.read(TEXT_PROBE_BYTES)
+    if prefix.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")):
         return "image"
-    if path.suffix.lower() in TEXT_EXTENSIONS or path.name.lower() in SPECIAL_TEXT_NAMES:
+    if prefix.startswith(b"RIFF") and prefix[8:12] == b"WEBP":
+        return "image"
+    if _is_text(prefix):
         return "text"
     return None
+
+
+def _is_text(content: bytes) -> bool:
+    if content.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+        return True
+    if b"\0" in content:
+        return False
+    if not content:
+        return True
+    control_bytes = sum(
+        byte < 32 and byte not in {7, 8, 9, 10, 12, 13, 27}
+        for byte in content
+    )
+    return control_bytes / len(content) <= 0.02
 
 
 def iter_project_files(root: Path) -> Iterator[Path]:
@@ -114,9 +92,13 @@ def read_text_context(path: Path) -> str:
         content = file.read(MAX_CONTEXT_FILE_BYTES + 1)
     if len(content) > MAX_CONTEXT_FILE_BYTES:
         raise ValueError(f"{path.name} is larger than the {MAX_CONTEXT_FILE_BYTES // 1024} KiB context limit.")
-    if b"\0" in content:
+    if not _is_text(content):
         raise ValueError(f"{path.name} appears to be a binary file and cannot be added as text.")
-    return content.decode("utf-8", errors="replace")
+    if content.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return content.decode("utf-32", errors="replace")
+    if content.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return content.decode("utf-16", errors="replace")
+    return content.decode("utf-8-sig", errors="replace")
 
 
 def build_prompt(
@@ -129,13 +111,15 @@ def build_prompt(
     for item in selected:
         if item.path.is_symlink():
             raise ValueError(f"{item.path.name} became a symbolic link and cannot be added as context.")
-        if project_root is not None:
+        if project_root is not None and not item.external:
             resolved_root = project_root.resolve(strict=True)
             resolved_path = item.path.resolve(strict=True)
             try:
                 relative = resolved_path.relative_to(resolved_root)
             except ValueError as error:
                 raise ValueError(f"{item.path.name} is outside the opened project folder.") from error
+        elif item.external:
+            relative = Path(item.label or item.path.name)
         else:
             relative = item.path
         relative = (

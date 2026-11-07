@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.context import ContextFile, build_prompt, iter_project_files, read_text_context
+from src.context import (
+    ContextFile,
+    build_prompt,
+    context_kind,
+    iter_project_files,
+    read_text_context,
+)
 
 
 class ContextTests(unittest.TestCase):
@@ -53,6 +59,38 @@ class ContextTests(unittest.TestCase):
             large.write_bytes(b"x" * (256 * 1024 + 1))
             with self.assertRaisesRegex(ValueError, "256 KiB"):
                 read_text_context(large)
+
+    def test_context_kind_sniffs_extensionless_text_and_rejects_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            license_file = root / "LICENSE"
+            license_file.write_bytes(b"MIT License\nPermission is hereby granted.\n")
+            binary_file = root / "archive.dat"
+            binary_file.write_bytes(b"\x00\x01\x02\xff")
+
+            self.assertEqual(context_kind(license_file), "text")
+            self.assertEqual(read_text_context(license_file), "MIT License\nPermission is hereby granted.\n")
+            self.assertIsNone(context_kind(binary_file))
+
+    def test_context_kind_recognizes_images_by_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            image = Path(temporary_directory) / "screenshot.data"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nmore bytes")
+
+            self.assertEqual(context_kind(image), "image")
+
+    def test_pasted_external_image_can_be_added_without_open_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            image = Path(temporary_directory) / "clipboard.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            prompt = build_prompt(
+                "Describe this screenshot.",
+                [ContextFile(image, "image", external=True, label="Clipboard image 1")],
+            )
+
+            self.assertIn("[Selected image: Clipboard image 1]", prompt)
+            self.assertNotIn(temporary_directory, prompt)
 
     def test_context_rejects_files_outside_the_open_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

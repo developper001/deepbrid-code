@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import queue
 import sqlite3
+import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+from PIL import Image, ImageGrab
 
 from .browser import BrowserLaunchError, DeepbridChatBrowser
 from .context import (
@@ -17,7 +20,7 @@ from .context import (
     read_text_context,
 )
 from .logo import create_brand_icon
-from .settings import AUTO_OPEN_CHROME, DARK_THEME, LAST_PROJECT, SettingsStore
+from .settings import AUTO_OPEN_CHROME, DARK_THEME, LAST_PROJECT, WRAP_TEXT, SettingsStore
 from .settings_dialog import SettingsDialog
 
 APP_DATA_DIR = Path(
@@ -25,6 +28,7 @@ APP_DATA_DIR = Path(
 ) / "Deepbrid Code"
 SETTINGS_DATABASE = APP_DATA_DIR / "settings.sqlite3"
 MAX_IMAGE_PREVIEW_BYTES = 20 * 1024 * 1024
+APP_ICON_PATH = Path(__file__).parent / "assets" / "deepbrid-code.ico"
 
 
 class DeepbridCodeApp:
@@ -35,6 +39,7 @@ class DeepbridCodeApp:
         self.settings = SettingsStore(SETTINGS_DATABASE)
         self.auto_open_chrome = self.settings.get_bool(AUTO_OPEN_CHROME, default=True)
         self.dark_theme = self.settings.get_bool(DARK_THEME, default=False)
+        self.wrap_text = self.settings.get_bool(WRAP_TEXT, default=True)
         self.last_project = self.settings.get(LAST_PROJECT)
         self.project_root: Path | None = None
         self.tree_paths: dict[str, Path] = {}
@@ -42,6 +47,9 @@ class DeepbridCodeApp:
         self.context_order: list[str] = []
         self.preview_image: tk.PhotoImage | None = None
         self.window_icons: tuple[tk.PhotoImage, ...] = ()
+        self.clipboard_image_directory: tempfile.TemporaryDirectory[str] | None = None
+        self.clipboard_images: set[Path] = set()
+        self.cleanup_clipboard_after_chat = False
         self.chat_browser = DeepbridChatBrowser(APP_DATA_DIR / "chrome-profile")
         self.chat_events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.chat_request_active = False
@@ -49,6 +57,7 @@ class DeepbridCodeApp:
 
         self._build_ui()
         self._apply_theme()
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.after(200, self._poll_chat_events)
         self.root.after(100, self._startup)
 
@@ -100,8 +109,30 @@ class DeepbridCodeApp:
         )
 
         ttk.Label(preview_panel, text="Preview").pack(anchor="w", pady=(0, 4))
-        self.preview = tk.Text(preview_panel, wrap="none", state="disabled")
-        self.preview.pack(fill="both", expand=True)
+        preview_frame = ttk.Frame(preview_panel)
+        preview_frame.pack(fill="both", expand=True)
+        preview_frame.rowconfigure(0, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+        self.preview = tk.Text(
+            preview_frame,
+            wrap="word" if self.wrap_text else "none",
+            state="disabled",
+            xscrollcommand=lambda first, last: self.preview_xscroll.set(first, last),
+            yscrollcommand=lambda first, last: self.preview_yscroll.set(first, last),
+        )
+        self.preview_yscroll = ttk.Scrollbar(
+            preview_frame,
+            orient="vertical",
+            command=self.preview.yview,
+        )
+        self.preview_xscroll = ttk.Scrollbar(
+            preview_frame,
+            orient="horizontal",
+            command=self.preview.xview,
+        )
+        self.preview.grid(row=0, column=0, sticky="nsew")
+        self.preview_yscroll.grid(row=0, column=1, sticky="ns")
+        self.preview_xscroll.grid(row=1, column=0, sticky="ew")
         self.preview_image_label = ttk.Label(preview_panel)
         self.preview_image_label.pack(fill="x")
 
@@ -121,6 +152,9 @@ class DeepbridCodeApp:
         ttk.Label(context_panel, text="Message").pack(anchor="w")
         self.message = tk.Text(context_panel, height=5, wrap="word")
         self.message.pack(fill="both", expand=True, pady=(4, 6))
+        self.message.bind("<Control-v>", self._paste_clipboard_image)
+        self.message.bind("<Control-V>", self._paste_clipboard_image)
+        self.message.bind("<Shift-Insert>", self._paste_clipboard_image)
         actions = ttk.Frame(context_panel)
         actions.pack(fill="x")
         ttk.Button(actions, text="Send to Deepbrid AI Chat", command=self._send).pack(
@@ -210,6 +244,8 @@ class DeepbridCodeApp:
                 self._set_auto_open_chrome,
                 self.dark_theme,
                 self._set_dark_theme,
+                self.wrap_text,
+                self._set_wrap_text,
             )
         except (OSError, sqlite3.Error) as error:
             self.status.set(f"Could not open Settings: {error}")
@@ -220,6 +256,10 @@ class DeepbridCodeApp:
     def _set_dark_theme(self, enabled: bool) -> None:
         self.dark_theme = enabled
         self._apply_theme()
+
+    def _set_wrap_text(self, enabled: bool) -> None:
+        self.wrap_text = enabled
+        self.preview.configure(wrap="word" if enabled else "none")
 
     def _apply_theme(self) -> None:
         if self.dark_theme:
@@ -348,6 +388,7 @@ class DeepbridCodeApp:
             for size in (16, 32, 48)
         )
         self.root.iconphoto(True, *self.window_icons)
+        self.root.iconbitmap(str(APP_ICON_PATH))
 
     def _show_file_context_menu(self, event: tk.Event) -> str:
         row = self.file_tree.identify_row(event.y)
@@ -375,7 +416,11 @@ class DeepbridCodeApp:
         path = self.tree_paths.get(selection[0])
         if path is None:
             return
-        kind = context_kind(path)
+        try:
+            kind = context_kind(path)
+        except (OSError, ValueError) as error:
+            self._set_preview(f"Could not inspect {path.name}: {error}")
+            return
         if kind == "text":
             try:
                 self.preview_image = None
@@ -418,7 +463,7 @@ class DeepbridCodeApp:
         if not selected_items:
             self.status.set("Select one or more supported files to add context.")
             return
-        added: list[str] = []
+        candidates: list[ContextFile] = []
         skipped: list[str] = []
         errors: list[str] = []
         for iid in selected_items:
@@ -426,25 +471,45 @@ class DeepbridCodeApp:
             if path is None:
                 skipped.append(f"{self.file_tree.item(iid, 'text')} (folder)")
                 continue
-            kind = context_kind(path)
+            try:
+                if path.is_symlink():
+                    raise ValueError(f"{path.name} became a symbolic link.")
+                kind = context_kind(path)
+            except (OSError, ValueError) as error:
+                errors.append(f"{path.name}: {error}")
+                continue
             if kind is None:
                 skipped.append(path.name)
                 continue
             try:
-                if path.is_symlink():
-                    raise ValueError(f"{path.name} became a symbolic link.")
                 resolved_path = path.resolve(strict=True)
                 relative_path = resolved_path.relative_to(self.project_root)
             except (OSError, RuntimeError, ValueError) as error:
                 errors.append(f"{path.name}: {error}")
                 continue
-            key = str(resolved_path)
+            candidates.append(ContextFile(resolved_path, kind, label=relative_path.as_posix()))
+        self._include_context(candidates, skipped, errors)
+
+    def _include_context(
+        self,
+        candidates: list[ContextFile],
+        skipped: list[str] | None = None,
+        errors: list[str] | None = None,
+    ) -> None:
+        skipped = skipped or []
+        errors = errors or []
+        added: list[str] = []
+        for item in candidates:
+            key = str(item.path)
             if key in self.context_files:
                 continue
-            self.context_files[key] = ContextFile(resolved_path, kind)
+            self.context_files[key] = item
             self.context_order.append(key)
-            self.context_list.insert("end", f"{relative_path} ({kind})")
-            added.append(path.name)
+            self.context_list.insert(
+                "end",
+                f"{item.label or item.path.name} ({item.kind})",
+            )
+            added.append(item.path.name)
         if added:
             last_added = len(self.context_order) - 1
             self.context_list.selection_clear(0, "end")
@@ -469,6 +534,47 @@ class DeepbridCodeApp:
                 f"{len(self.context_files)} context item(s) total."
             )
         self.status.set(" ".join(messages))
+
+    def _paste_clipboard_image(self, _event: tk.Event) -> str | None:
+        try:
+            clipboard_content = ImageGrab.grabclipboard()
+        except OSError as error:
+            self.status.set(f"Could not read the clipboard image: {error}")
+            return None
+        if not isinstance(clipboard_content, Image.Image):
+            return None
+        try:
+            if self.clipboard_image_directory is None:
+                self.clipboard_image_directory = tempfile.TemporaryDirectory(
+                    prefix="deepbrid-code-clipboard-"
+                )
+            image_path = (
+                Path(self.clipboard_image_directory.name)
+                / f"clipboard-{len(self.clipboard_images) + 1}.png"
+            )
+            clipboard_content.convert("RGBA").save(image_path, format="PNG")
+            if image_path.stat().st_size > MAX_IMAGE_PREVIEW_BYTES:
+                image_path.unlink()
+                self.status.set(
+                    f"Clipboard image exceeds the {MAX_IMAGE_PREVIEW_BYTES // (1024 * 1024)} MiB limit."
+                )
+                return "break"
+        except (OSError, ValueError) as error:
+            self.status.set(f"Could not save clipboard image: {error}")
+            return "break"
+
+        self.clipboard_images.add(image_path)
+        self._include_context(
+            [
+                ContextFile(
+                    image_path,
+                    "image",
+                    external=True,
+                    label=f"Clipboard image {len(self.clipboard_images)}",
+                )
+            ]
+        )
+        return "break"
 
     def _remove_context(self) -> None:
         selected = list(self.context_list.curselection())
@@ -501,6 +607,11 @@ class DeepbridCodeApp:
         image_paths = [
             item.path for item in self.context_files.values() if item.kind == "image"
         ]
+        external_image_paths = [
+            item.path
+            for item in self.context_files.values()
+            if item.kind == "image" and item.external
+        ]
         self.chat_request_active = True
         self._append_chat("You", prompt)
         if image_paths:
@@ -510,7 +621,7 @@ class DeepbridCodeApp:
         self._start_progress()
         worker = threading.Thread(
             target=self._chat_worker,
-            args=(prompt, image_paths, self.project_root),
+            args=(prompt, image_paths, self.project_root, external_image_paths),
             name="deepbrid-chat-ui",
             daemon=True,
         )
@@ -526,15 +637,24 @@ class DeepbridCodeApp:
         prompt: str,
         image_paths: list[Path],
         project_root: Path | None,
+        external_image_paths: list[Path],
     ) -> None:
         try:
-            response = self.chat_browser.send_message(prompt, image_paths, project_root)
+            response = self.chat_browser.send_message(
+                prompt,
+                image_paths,
+                project_root,
+                external_image_paths,
+            )
         except BrowserLaunchError as error:
             self.chat_events.put(("chat-error", str(error)))
         except (OSError, ValueError, RuntimeError) as error:
             self.chat_events.put(("chat-error", f"Chat operation failed: {error}"))
         else:
             self.chat_events.put(("chat-success", response))
+        finally:
+            if self.cleanup_clipboard_after_chat:
+                self._cleanup_clipboard_images()
 
     def _poll_chat_events(self) -> None:
         while True:
@@ -601,6 +721,19 @@ class DeepbridCodeApp:
             self.chat_events.put(("browser-error", f"Could not open Deepbrid AI Chat: {error}"))
         else:
             self.chat_events.put((f"browser-{landing_page}", ""))
+
+    def _close(self) -> None:
+        if self.chat_request_active:
+            self.cleanup_clipboard_after_chat = True
+        else:
+            self._cleanup_clipboard_images()
+        self.root.destroy()
+
+    def _cleanup_clipboard_images(self) -> None:
+        if self.clipboard_image_directory is not None:
+            self.clipboard_image_directory.cleanup()
+            self.clipboard_image_directory = None
+            self.clipboard_images.clear()
 
 
 def main() -> None:

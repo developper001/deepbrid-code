@@ -104,6 +104,7 @@ class BrowserTests(unittest.TestCase):
             "ws://127.0.0.1:9225/devtools/page/one",
             [],
             None,
+            set(),
         )
         self.assertIn("textarea[aria-label", evaluate.call_args_list[0].args[1])
         self.assertIn("Explain the selected code.", evaluate.call_args_list[1].args[1])
@@ -160,6 +161,32 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(calls[1].args[2]["selector"], 'input[type="file"][accept*="image/"]')
         self.assertEqual(calls[2].args[1], "DOM.setFileInputFiles")
         self.assertEqual(calls[2].args[2]["files"], [str(image.resolve())])
+
+    def test_pasted_external_image_is_permitted_without_a_project(self) -> None:
+        browser = DeepbridChatBrowser(Path("unused"))
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            image = Path(temporary_directory) / "clipboard.png"
+            image.write_bytes(b"synthetic image")
+            with patch.object(
+                browser,
+                "_send_command",
+                side_effect=[
+                    {"root": {"nodeId": 1}},
+                    {"nodeId": 2},
+                    {},
+                ],
+            ) as send_command:
+                browser._attach_images(
+                    "ws://127.0.0.1:9225/devtools/page/one",
+                    [image],
+                    None,
+                    {image.resolve()},
+                )
+
+        self.assertEqual(
+            send_command.call_args_list[2].args[2]["files"],
+            [str(image.resolve())],
+        )
 
     def test_devtools_refuses_non_loopback_connection(self) -> None:
         with self.assertRaisesRegex(BrowserLaunchError, "non-local Chrome DevTools"):
