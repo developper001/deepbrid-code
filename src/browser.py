@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 import shutil
@@ -188,6 +189,7 @@ class DeepbridChatBrowser:
         assistant_count = state.get("assistantCount")
         if not isinstance(assistant_count, int):
             raise BrowserLaunchError("Deepbrid AI Chat did not confirm the submitted message.")
+        self._wait_for_submission(websocket_url, assistant_count)
 
         deadline = time.monotonic() + RESPONSE_TIMEOUT
         while time.monotonic() < deadline:
@@ -209,6 +211,21 @@ class DeepbridChatBrowser:
         raise BrowserLaunchError(
             "The message was submitted, but Deepbrid AI Chat did not finish a response "
             f"within {RESPONSE_TIMEOUT} seconds. Check the browser and retry if needed."
+        )
+
+    def _wait_for_submission(self, websocket_url: str, assistant_count: int) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = self._evaluate(
+                websocket_url,
+                self._submission_state_script(assistant_count),
+            )
+            if isinstance(state, dict) and state.get("accepted") is True:
+                return
+            time.sleep(0.2)
+        raise BrowserLaunchError(
+            "Deepbrid AI Chat did not accept the message. The prompt is still in the "
+            "composer; check the attachment and try sending again."
         )
 
     def _wait_for_debug_port(self) -> int:
@@ -354,6 +371,19 @@ class DeepbridChatBrowser:
                     f"{path.name} exceeds the {MAX_IMAGE_ATTACHMENT_BYTES // (1024 * 1024)} MiB image limit."
                 )
             resolved_paths.append(resolved_path)
+        initial_attachments = self._evaluate(
+            websocket_url,
+            self._attachment_state_script(),
+        )
+        if not isinstance(initial_attachments, dict):
+            raise BrowserLaunchError("Could not inspect Deepbrid AI Chat attachments.")
+        initial_names = initial_attachments.get("readyNames")
+        if not isinstance(initial_names, list) or not all(
+            isinstance(name, str) for name in initial_names
+        ):
+            raise BrowserLaunchError("Deepbrid AI Chat returned invalid attachment state.")
+        expected_names = Counter(initial_names)
+        expected_names.update(path.name for path in resolved_paths)
         connection = self._open_devtools_connection(websocket_url)
         try:
             document = self._send_command_on_connection(
@@ -391,6 +421,53 @@ class DeepbridChatBrowser:
             )
         finally:
             self._close_devtools_connection(connection)
+        self._wait_for_image_attachments(websocket_url, expected_names)
+
+    def _wait_for_image_attachments(
+        self,
+        websocket_url: str,
+        expected_names: Counter[str],
+    ) -> None:
+        deadline = time.monotonic() + DEBUGGER_TIMEOUT
+        expected_count = sum(expected_names.values())
+        while time.monotonic() < deadline:
+            state = self._evaluate(websocket_url, self._attachment_state_script())
+            if not isinstance(state, dict):
+                raise BrowserLaunchError("Could not confirm the image attachment state.")
+            failed = state.get("failedNames")
+            if isinstance(failed, list) and failed:
+                raise BrowserLaunchError(
+                    "Deepbrid AI Chat could not prepare these attachment(s): "
+                    + ", ".join(str(name) for name in failed)
+                )
+            ready_names = state.get("readyNames")
+            if not isinstance(ready_names, list) or not all(
+                isinstance(name, str) for name in ready_names
+            ):
+                raise BrowserLaunchError("Deepbrid AI Chat returned invalid attachment state.")
+            ready_counts = Counter(ready_names)
+            if all(
+                ready_counts[name] >= count
+                for name, count in expected_names.items()
+            ):
+                return
+            time.sleep(0.2)
+        raise BrowserLaunchError(
+            "Deepbrid AI Chat is still processing the image attachment. Wait for its "
+            "thumbnail to finish loading, then retry."
+        )
+
+    @staticmethod
+    def _attachment_state_script() -> str:
+        return (
+            "(()=>{const root=document.querySelector('.dfy-composer');"
+            "if(!root)return {readyNames:[],failedNames:[]};"
+            "return {readyNames:[...root.querySelectorAll('.dfy-att.is-ready .dfy-att-name')]"
+            ".map(e=>(e.textContent||'').trim()).filter(Boolean),"
+            "failedNames:[...root.querySelectorAll('.dfy-att.is-error,.dfy-att.is-failed')]"
+            ".map(e=>e.querySelector('.dfy-att-name')?.textContent?.trim()||e.title||'image')};"
+            "})()"
+        )
 
     def _evaluate(self, websocket_url: str, expression: str) -> object:
         result = self._send_command(
@@ -518,6 +595,20 @@ class DeepbridChatBrowser:
             "return {assistantCount:messages.length,"
             "busy:!!button&&!/^(send|envoyer)$/i.test(label),"
             "response:messages.at(-1)?.querySelector('.dfy-msg-content')?.innerText||''};"
+            "})()"
+        )
+
+    @staticmethod
+    def _submission_state_script(assistant_count: int) -> str:
+        return (
+            "(()=>{"
+            "const input=document.querySelector('textarea[aria-label=\"Message\"]');"
+            "const button=input?.parentElement?.querySelector('button.dfy-send');"
+            "const label=(button?.getAttribute('aria-label')||button?.title||'').trim();"
+            "const thread=document.querySelector('.dfy-thread');"
+            "const currentCount=thread?.querySelectorAll('.dfy-msg-asst').length||0;"
+            f"return {{accepted:!!input&&!!button&&(input.value.trim()===''||button.disabled||"
+            f"(!/^(send|envoyer)$/i.test(label))||currentCount>{assistant_count})}};"
             "})()"
         )
 

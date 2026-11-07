@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,10 +45,20 @@ class BrowserImageUploadTests(unittest.TestCase):
             connection = FakeWebSocket()
             browser = DeepbridChatBrowser(project / "profile")
 
-            with patch(
-                "src.browser.websocket.create_connection",
-                return_value=connection,
-            ) as create_connection:
+            with (
+                patch(
+                    "src.browser.websocket.create_connection",
+                    return_value=connection,
+                ) as create_connection,
+                patch.object(
+                    browser,
+                    "_evaluate",
+                    side_effect=[
+                        {"readyNames": []},
+                        {"readyNames": ["screenshot.png"], "failedNames": []},
+                    ],
+                ) as evaluate,
+            ):
                 browser._attach_images(
                     "ws://127.0.0.1:9222/devtools/page/test",
                     [image],
@@ -55,6 +66,7 @@ class BrowserImageUploadTests(unittest.TestCase):
                 )
 
             create_connection.assert_called_once()
+            self.assertEqual(evaluate.call_count, 2)
             self.assertTrue(connection.closed)
             self.assertEqual(
                 [command["method"] for command in connection.commands],
@@ -76,3 +88,42 @@ class BrowserImageUploadTests(unittest.TestCase):
                 connection.commands[2]["params"],
                 {"nodeId": 20, "files": [str(image.resolve())]},
             )
+
+    def test_attachment_wait_requires_all_requested_files_ready(self) -> None:
+        browser = DeepbridChatBrowser(Path("profile"))
+        with patch.object(
+            browser,
+            "_evaluate",
+            side_effect=[
+                {"readyNames": ["existing.png"], "failedNames": []},
+                {
+                    "readyNames": ["existing.png", "new.png"],
+                    "failedNames": [],
+                },
+            ],
+        ) as evaluate:
+            browser._wait_for_image_attachments(
+                "ws://127.0.0.1:9222/devtools/page/test",
+                Counter({"existing.png": 1, "new.png": 1}),
+            )
+        self.assertEqual(evaluate.call_count, 2)
+
+    def test_submission_wait_reports_if_prompt_was_not_accepted(self) -> None:
+        browser = DeepbridChatBrowser(Path("profile"))
+        with (
+            patch.object(
+                browser,
+                "_evaluate",
+                return_value={"accepted": False},
+            ),
+            patch("src.browser.time.monotonic", side_effect=[0, 6]),
+            patch("src.browser.time.sleep"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "did not accept the message",
+            ):
+                browser._wait_for_submission(
+                    "ws://127.0.0.1:9222/devtools/page/test",
+                    0,
+                )
