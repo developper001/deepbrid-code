@@ -68,15 +68,16 @@ attached by the app.
 ## Using included context
 
 1. Open a project folder. Select a file in **Project files** to preview it.
-2. Select one or more files (Ctrl-click or Shift-click for multiple selection)
-   and click **Add selected to context**, or right-click a selected file and
-   choose the same command. The app checks file contents rather than relying on
-   the extension: text files such as `LICENSE` are included, recognized images
-   are attached as images, and binary files are refused. Added files are marked
+2. Right-click a file and choose **Add selected to context**. The app checks
+   file contents rather than relying on the extension: text files such as
+   `LICENSE` are included, recognized images are attached as images, and binary
+   files are refused. Right-click a directory and choose
+   **Add text files in directory to context** to include its recursively found
+   text files; non-text files are checked and ignored. Added files are marked
    with `*` in the project tree. Selecting or previewing a file alone does not
    include or send it.
-3. To exclude an item, select it in the tree and click
-   **Remove selected from context**.
+3. Right-click a marked file and choose **Remove selected from context** to
+   exclude it.
 4. Enter your question in **Message**, then choose **Send to Deepbrid AI Chat**
    to send the message and listed context.
 
@@ -93,11 +94,16 @@ Ctrl+V. Clipboard screenshots and copied image-file paths are added to the
 pasting does not send anything by itself. Pasted images are held in a temporary
 local folder and removed when the app closes.
 
-The app opens with a larger chat workspace. Each prompt in the in-memory
-conversation is preceded by a timestamped separator to make turns easier to
-distinguish.
+The app opens at 1180x760, with the project files pane using about one quarter
+of the window width and most space reserved for chat. Each prompt in the
+in-memory conversation is preceded by a timestamped separator.
 
-## Preferences
+## Console and preferences
+
+Open **Console** to view timestamped application diagnostics and errors. The
+console keeps the latest messages in memory while the app is running. To retain
+them across runs, open **Settings**, enable **Append console logs to a file**,
+and choose a log file.
 
 The app remembers the last project folder and reopens it next time. Both
 preferences, the automatic Chrome startup setting, and the dark theme choice

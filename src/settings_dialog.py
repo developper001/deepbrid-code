@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 from typing import Callable, Protocol
 
 from .settings import AUTO_OPEN_CHROME, DARK_THEME, WRAP_TEXT
@@ -23,15 +23,19 @@ class SettingsDialog:
         on_dark_theme_changed: Callable[[bool], None],
         wrap_text: bool,
         on_wrap_text_changed: Callable[[bool], None],
+        output_log_enabled: bool,
+        output_log_path: str,
+        on_output_logging_changed: Callable[[bool, str], None],
     ) -> None:
         self.settings = settings
         self.on_auto_open_changed = on_auto_open_changed
         self.on_dark_theme_changed = on_dark_theme_changed
         self.on_wrap_text_changed = on_wrap_text_changed
+        self.on_output_logging_changed = on_output_logging_changed
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Settings")
-        self.dialog.geometry("640x400")
-        self.dialog.minsize(560, 340)
+        self.dialog.geometry("640x480")
+        self.dialog.minsize(560, 420)
         self.dialog.transient(parent)
 
         frame = ttk.Frame(self.dialog, padding=16)
@@ -51,6 +55,12 @@ class SettingsDialog:
         ttk.Label(
             navigation,
             text="Appearance",
+            relief="solid",
+            padding=(10, 6),
+        ).pack(fill="x", pady=(6, 0))
+        ttk.Label(
+            navigation,
+            text="Diagnostics",
             relief="solid",
             padding=(10, 6),
         ).pack(fill="x", pady=(6, 0))
@@ -103,11 +113,52 @@ class SettingsDialog:
             variable=self.wrap_text,
             command=self._save_wrap_text,
         ).grid(row=6, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(content, textvariable=self.status).grid(
-            row=7,
+        ttk.Separator(content).grid(row=7, column=0, sticky="ew", pady=(14, 10))
+        ttk.Label(content, text="Diagnostics", font=("TkDefaultFont", 12, "bold")).grid(
+            row=8,
             column=0,
             sticky="w",
-            pady=(12, 0),
+            pady=(0, 6),
+        )
+        self.output_log_enabled = tk.BooleanVar(
+            master=self.dialog,
+            value=output_log_enabled,
+        )
+        self.output_log_path = tk.StringVar(
+            master=self.dialog,
+            value=output_log_path,
+        )
+        self.output_log_status = tk.StringVar(master=self.dialog)
+        ttk.Checkbutton(
+            content,
+            text="Append console logs to a file",
+            variable=self.output_log_enabled,
+            command=self._save_output_logging,
+        ).grid(row=9, column=0, sticky="w")
+        log_path_controls = ttk.Frame(content)
+        log_path_controls.grid(row=10, column=0, sticky="ew", pady=(6, 0))
+        log_path_controls.columnconfigure(0, weight=1)
+        ttk.Entry(
+            log_path_controls,
+            textvariable=self.output_log_path,
+            state="readonly",
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            log_path_controls,
+            text="Browse...",
+            command=self._browse_output_log,
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Label(content, textvariable=self.output_log_status).grid(
+            row=11,
+            column=0,
+            sticky="w",
+            pady=(4, 0),
+        )
+        ttk.Label(content, textvariable=self.status).grid(
+            row=12,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
         )
         ttk.Button(frame, text="Close", command=self.dialog.destroy).grid(
             row=1,
@@ -119,6 +170,8 @@ class SettingsDialog:
         self.saved_enabled = auto_open_chrome
         self.saved_dark_theme = dark_theme
         self.saved_wrap_text = wrap_text
+        self.saved_output_log_enabled = output_log_enabled
+        self.saved_output_log_path = output_log_path
 
     def _save(self) -> None:
         enabled = self.enabled.get()
@@ -158,3 +211,34 @@ class SettingsDialog:
         self.saved_wrap_text = enabled
         self.on_wrap_text_changed(enabled)
         self.status.set("Saved.")
+
+    def _save_output_logging(self) -> None:
+        enabled = self.output_log_enabled.get()
+        path = self.output_log_path.get()
+        try:
+            self.on_output_logging_changed(enabled, path)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            self.output_log_enabled.set(self.saved_output_log_enabled)
+            self.output_log_path.set(self.saved_output_log_path)
+            self.output_log_status.set(f"Could not save output log setting: {error}")
+            return
+        self.saved_output_log_enabled = enabled
+        self.saved_output_log_path = path
+        self.output_log_status.set(
+            "Console output is appended to the selected file."
+            if enabled
+            else "File logging is disabled."
+        )
+
+    def _browse_output_log(self) -> None:
+        selected = filedialog.asksaveasfilename(
+            parent=self.dialog,
+            title="Choose console log file",
+            initialfile=self.output_log_path.get() or "deepbrid-code.log",
+            defaultextension=".log",
+            filetypes=(("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*")),
+        )
+        if not selected:
+            return
+        self.output_log_path.set(selected)
+        self._save_output_logging()

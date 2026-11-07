@@ -12,11 +12,29 @@ from PIL import Image
 
 from src.app import DeepbridCodeApp
 from src.context import build_prompt
-from src.settings import AUTO_OPEN_CHROME, DARK_THEME, LAST_PROJECT, WRAP_TEXT, SettingsStore
+from src.settings import (
+    AUTO_OPEN_CHROME,
+    DARK_THEME,
+    LAST_PROJECT,
+    OUTPUT_LOG_ENABLED,
+    OUTPUT_LOG_PATH,
+    WRAP_TEXT,
+    SettingsStore,
+)
 from src.settings_dialog import SettingsDialog
 
 
 class AppStartupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.browser_start_patcher = patch.object(
+            DeepbridCodeApp,
+            "_start_browser_open",
+        )
+        self.browser_start_patcher.start()
+
+    def tearDown(self) -> None:
+        self.browser_start_patcher.stop()
+
     def test_startup_reopens_saved_project_and_honors_disabled_chrome_setting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root_path = Path(temporary_directory)
@@ -45,26 +63,6 @@ class AppStartupTests(unittest.TestCase):
             finally:
                 root.destroy()
 
-    def test_startup_opens_chrome_by_default(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root_path = Path(temporary_directory)
-            database = root_path / "settings.sqlite3"
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                with (
-                    patch("src.app.SETTINGS_DATABASE", database),
-                    patch("src.app.APP_DATA_DIR", root_path),
-                    patch.object(DeepbridCodeApp, "_start_browser_open") as open_browser,
-                ):
-                    app = DeepbridCodeApp(root)
-                    app._startup()
-
-                self.assertTrue(app.auto_open_chrome)
-                open_browser.assert_called_once_with(startup=True)
-            finally:
-                root.destroy()
-
     def test_dark_theme_is_restored_and_progress_is_hidden_when_idle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root_path = Path(temporary_directory)
@@ -80,7 +78,7 @@ class AppStartupTests(unittest.TestCase):
                     app = DeepbridCodeApp(root)
                     self.assertTrue(app.dark_theme)
                     self.assertTrue(app.wrap_text)
-                    self.assertTrue(root.geometry().startswith("1440x900"))
+                    self.assertTrue(root.geometry().startswith("1180x760"))
                     self.assertEqual(app.chat_output.cget("height"), 20)
                     self.assertEqual(app.message.cget("height"), 7)
                     self.assertEqual((app.logo_image.width(), app.logo_image.height()), (48, 48))
@@ -90,6 +88,15 @@ class AppStartupTests(unittest.TestCase):
                     )
                     self.assertEqual(app.preview.cget("background"), "#171c19")
                     self.assertFalse(app.progress.winfo_manager())
+                    app._initial_sash_set = False
+                    with (
+                        patch.object(app.main_pane, "winfo_width", return_value=1200),
+                        patch.object(app.main_pane, "sashpos") as set_sash,
+                    ):
+                        app._size_initial_panes(SimpleNamespace())
+                    set_sash.assert_called_once_with(0, 300)
+                    self.assertFalse(hasattr(app, "add_context_button"))
+                    self.assertFalse(hasattr(app, "remove_context_button"))
 
                     app._start_progress()
                     self.assertEqual(app.progress.winfo_manager(), "pack")
@@ -151,7 +158,7 @@ class AppStartupTests(unittest.TestCase):
             finally:
                 root.destroy()
 
-    def test_add_context_button_includes_the_selected_file(self) -> None:
+    def test_right_click_context_menu_adds_and_removes_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root_path = Path(temporary_directory)
             project = root_path / "project"
@@ -166,27 +173,42 @@ class AppStartupTests(unittest.TestCase):
                 ):
                     app = DeepbridCodeApp(root)
                     app._load_project(project)
-                    app.file_tree.selection_set("f:main.py")
-                    app.add_context_button.invoke()
+                    item = "f:main.py"
+                    event = SimpleNamespace(y=10, x_root=20, y_root=30)
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=item),
+                        patch.object(app.file_context_menu, "tk_popup"),
+                    ):
+                        app._show_file_context_menu(event)
+                    app.file_context_menu.invoke(0)
 
                     self.assertEqual(len(app.context_files), 1)
                     self.assertEqual(app.file_tree.item("f:main.py", "text"), "* main.py")
                     self.assertIn("Added main.py", app.status.get())
 
-                    app.file_tree.selection_set("f:main.py")
-                    app.remove_context_button.invoke()
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=item),
+                        patch.object(app.file_context_menu, "tk_popup"),
+                    ):
+                        app._show_file_context_menu(event)
+                    app.file_context_menu.invoke(1)
                     self.assertEqual(len(app.context_files), 0)
                     self.assertEqual(app.file_tree.item("f:main.py", "text"), "main.py")
+                    self.assertFalse(hasattr(app, "add_context_button"))
+                    self.assertFalse(hasattr(app, "remove_context_button"))
             finally:
                 root.destroy()
 
-    def test_add_context_button_explains_that_folders_are_not_context_files(self) -> None:
+    def test_directory_context_adds_text_files_and_ignores_non_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root_path = Path(temporary_directory)
             project = root_path / "project"
             source = project / "src"
-            source.mkdir(parents=True)
+            nested = source / "nested"
+            nested.mkdir(parents=True)
             (source / "main.py").write_text("print('hello')", encoding="utf-8")
+            (nested / "README").write_text("read me", encoding="utf-8")
+            (source / "asset.bin").write_bytes(b"\x00\x01\xff")
             root = tk.Tk()
             root.withdraw()
             try:
@@ -196,12 +218,22 @@ class AppStartupTests(unittest.TestCase):
                 ):
                     app = DeepbridCodeApp(root)
                     app._load_project(project)
-                    app.file_tree.selection_set("d:src")
-                    app.add_context_button.invoke()
+                    item = "d:src"
+                    event = SimpleNamespace(y=10, x_root=20, y_root=30)
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=item),
+                        patch.object(app.file_context_menu, "tk_popup"),
+                    ):
+                        app._show_file_context_menu(event)
+                    app.file_context_menu.invoke(0)
 
-                    self.assertEqual(len(app.context_files), 0)
-                    self.assertIn("src (folder)", app.status.get())
-                    self.assertIn("Skipped unsupported item", app.status.get())
+                    self.assertEqual(len(app.context_files), 2)
+                    self.assertEqual(
+                        {context.label for context in app.context_files.values()},
+                        {"src/main.py", "src/nested/README"},
+                    )
+                    self.assertIn("Ignored 1 non-text file", app.status.get())
+                    self.assertIn("asset.bin", {path.name for path in app.tree_paths.values()})
             finally:
                 root.destroy()
 
@@ -265,8 +297,13 @@ class AppStartupTests(unittest.TestCase):
                         str(next(iter(app.context_files.values())).path)
                     ]
                     self.assertTrue(app.file_tree.exists(context_iid))
-                    app.file_tree.selection_set(context_iid)
-                    app.remove_context_button.invoke()
+                    event = SimpleNamespace(y=10, x_root=20, y_root=30)
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=context_iid),
+                        patch.object(app.file_context_menu, "tk_popup"),
+                    ):
+                        app._show_file_context_menu(event)
+                    app.file_context_menu.invoke(1)
                     self.assertEqual(len(app.context_files), 0)
                     self.assertFalse(app.file_tree.exists(context_iid))
                     app._cleanup_clipboard_images()
@@ -359,6 +396,9 @@ class AppStartupTests(unittest.TestCase):
                         app._set_dark_theme,
                         app.wrap_text,
                         app._set_wrap_text,
+                        app.output_log_enabled,
+                        app.output_log_path,
+                        app._set_output_logging,
                     )
                     dialog.dark_theme.set(True)
                     dialog._save_dark_theme()
@@ -371,6 +411,41 @@ class AppStartupTests(unittest.TestCase):
                 self.assertFalse(app.wrap_text)
                 self.assertEqual(dialog.status.get(), "Saved.")
                 dialog.dialog.destroy()
+            finally:
+                root.destroy()
+
+    def test_console_displays_logs_and_optional_file_logging_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            log_path = root_path / "logs" / "deepbrid-code.log"
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app._set_output_logging(True, str(log_path))
+                    app._log("A diagnostic message")
+                    app._open_console()
+
+                    self.assertTrue(log_path.is_file())
+                    self.assertIn("A diagnostic message", log_path.read_text(encoding="utf-8"))
+                    self.assertIn(
+                        "A diagnostic message",
+                        app.console_output.get("1.0", "end"),
+                    )
+                    self.assertTrue(app.settings.get_bool(OUTPUT_LOG_ENABLED, default=False))
+                    self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), str(log_path))
+                    self.assertIn("A diagnostic message", app.console_history[-1])
+                    app._close_console()
+                    app._set_output_logging(False, str(log_path))
+                    app._log("Not written to file")
+                    self.assertNotIn(
+                        "Not written to file",
+                        log_path.read_text(encoding="utf-8"),
+                    )
             finally:
                 root.destroy()
 

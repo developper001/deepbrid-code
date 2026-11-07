@@ -10,6 +10,8 @@ AUTO_OPEN_CHROME = "auto_open_chrome"
 DARK_THEME = "dark_theme"
 LAST_PROJECT = "last_project"
 WRAP_TEXT = "wrap_text"
+OUTPUT_LOG_ENABLED = "output_log_enabled"
+OUTPUT_LOG_PATH = "output_log_path"
 
 
 class SettingsStore:

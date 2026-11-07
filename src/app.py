@@ -6,11 +6,14 @@ import sqlite3
 import tempfile
 import threading
 import tkinter as tk
+import traceback
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from types import TracebackType
 
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageTk
 
 from .browser import BrowserLaunchError, DeepbridChatBrowser
 from .context import (
@@ -21,7 +24,15 @@ from .context import (
     read_text_context,
 )
 from .logo import create_brand_icon
-from .settings import AUTO_OPEN_CHROME, DARK_THEME, LAST_PROJECT, WRAP_TEXT, SettingsStore
+from .settings import (
+    AUTO_OPEN_CHROME,
+    DARK_THEME,
+    LAST_PROJECT,
+    OUTPUT_LOG_ENABLED,
+    OUTPUT_LOG_PATH,
+    WRAP_TEXT,
+    SettingsStore,
+)
 from .settings_dialog import SettingsDialog
 
 APP_DATA_DIR = Path(
@@ -36,15 +47,18 @@ class DeepbridCodeApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Deepbrid Code")
-        self.root.geometry("1440x900")
-        self.root.minsize(1000, 700)
+        self.root.geometry("1180x760")
+        self.root.minsize(900, 600)
         self.settings = SettingsStore(SETTINGS_DATABASE)
         self.auto_open_chrome = self.settings.get_bool(AUTO_OPEN_CHROME, default=True)
         self.dark_theme = self.settings.get_bool(DARK_THEME, default=False)
         self.wrap_text = self.settings.get_bool(WRAP_TEXT, default=True)
+        self.output_log_enabled = self.settings.get_bool(OUTPUT_LOG_ENABLED, default=False)
+        self.output_log_path = self.settings.get(OUTPUT_LOG_PATH) or ""
         self.last_project = self.settings.get(LAST_PROJECT)
         self.project_root: Path | None = None
         self.tree_paths: dict[str, Path] = {}
+        self.tree_directories: dict[str, Path] = {}
         self.context_files: dict[str, ContextFile] = {}
         self.context_order: list[str] = []
         self.context_tree_iids: dict[str, str] = {}
@@ -52,20 +66,40 @@ class DeepbridCodeApp:
         self.pasted_context_group: str | None = None
         self.next_external_tree_id = 1
         self.preview_image: tk.PhotoImage | None = None
+        self.preview_path: Path | None = None
         self.window_icons: tuple[tk.PhotoImage, ...] = ()
         self.clipboard_image_directory: tempfile.TemporaryDirectory[str] | None = None
         self.clipboard_images: set[Path] = set()
         self.cleanup_clipboard_after_chat = False
         self.chat_browser = DeepbridChatBrowser(APP_DATA_DIR / "chrome-profile")
         self.chat_events: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.console_events: queue.Queue[str] = queue.Queue()
+        self.console_history: deque[str] = deque(maxlen=2000)
+        self.console_window: tk.Toplevel | None = None
+        self.console_output: tk.Text | None = None
+        self._log_lock = threading.Lock()
+        self._previous_callback_exception = self.root.report_callback_exception
+        self._poll_after_id: str | None = None
+        self._startup_after_id: str | None = None
+        self._initial_sash_set = False
         self.chat_request_active = False
         self.browser_request_active = False
 
         self._build_ui()
         self._apply_theme()
+        self.root.report_callback_exception = self._report_callback_exception
+        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
+        if self.output_log_enabled:
+            try:
+                self._validate_output_log_path(self.output_log_path)
+            except (OSError, ValueError) as error:
+                self.output_log_enabled = False
+                self.status.set(f"Could not enable saved log file: {error}")
+                self._log(f"Could not enable saved log file: {error}")
+        self._log("Deepbrid Code started.")
         self.root.protocol("WM_DELETE_WINDOW", self._close)
-        self.root.after(200, self._poll_chat_events)
-        self.root.after(100, self._startup)
+        self._poll_after_id = self.root.after(200, self._poll_chat_events)
+        self._startup_after_id = self.root.after(100, self._startup)
 
     def _build_ui(self) -> None:
         toolbar = ttk.Frame(self.root, padding=8)
@@ -82,16 +116,22 @@ class DeepbridCodeApp:
             side="left",
             padx=(8, 0),
         )
+        ttk.Button(toolbar, text="Console", command=self._open_console).pack(
+            side="left",
+            padx=(8, 0),
+        )
         self.project_label = ttk.Label(toolbar, text="No project open")
         self.project_label.pack(side="left", padx=12)
 
         main = ttk.Panedwindow(self.root, orient="horizontal")
+        self.main_pane = main
         main.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         files_panel = ttk.Frame(main, padding=4)
         chat_panel = ttk.Frame(main, padding=4)
         main.add(files_panel, weight=1)
-        main.add(chat_panel, weight=4)
+        main.add(chat_panel, weight=3)
+        main.bind("<Configure>", self._size_initial_panes, add="+")
 
         files_panel.rowconfigure(1, weight=3)
         files_panel.columnconfigure(0, weight=1)
@@ -116,30 +156,15 @@ class DeepbridCodeApp:
             label="Remove selected from context",
             command=self._remove_selected_context,
         )
-        self.add_context_button = ttk.Button(
-            files_panel,
-            text="Add selected to context",
-            command=self._add_context,
-        )
-        self.add_context_button.grid(
-            row=2, column=0, sticky="ew", pady=(6, 2)
-        )
-        self.remove_context_button = ttk.Button(
-            files_panel,
-            text="Remove selected from context",
-            command=self._remove_selected_context,
-        )
-        self.remove_context_button.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-
         ttk.Label(files_panel, text="Preview").grid(
-            row=4,
+            row=2,
             column=0,
             sticky="w",
             pady=(0, 4),
         )
         preview_frame = ttk.Frame(files_panel)
-        preview_frame.grid(row=5, column=0, sticky="nsew")
-        files_panel.rowconfigure(5, weight=2)
+        preview_frame.grid(row=3, column=0, sticky="nsew")
+        files_panel.rowconfigure(3, weight=2)
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
         self.preview = tk.Text(
@@ -163,7 +188,7 @@ class DeepbridCodeApp:
         self.preview_yscroll.grid(row=0, column=1, sticky="ns")
         self.preview_xscroll.grid(row=1, column=0, sticky="ew")
         self.preview_image_label = ttk.Label(files_panel)
-        self.preview_image_label.grid(row=6, column=0, sticky="ew")
+        self.preview_image_label.grid(row=4, column=0, sticky="ew")
 
         ttk.Label(chat_panel, text="Conversation (kept in memory only)").pack(anchor="w")
         self.chat_output = tk.Text(chat_panel, height=20, wrap="word", state="disabled")
@@ -196,6 +221,15 @@ class DeepbridCodeApp:
             return
         self._load_project(Path(selected))
 
+    def _size_initial_panes(self, _event: tk.Event) -> None:
+        if self._initial_sash_set:
+            return
+        width = self.main_pane.winfo_width()
+        if width <= 1:
+            return
+        self.main_pane.sashpos(0, max(220, int(width * 0.25)))
+        self._initial_sash_set = True
+
     def _load_project(self, root: Path) -> None:
         if not root.is_dir():
             messagebox.showerror("Could not open folder", f"{root} is not a folder.")
@@ -212,10 +246,13 @@ class DeepbridCodeApp:
         self.context_tree_iids.clear()
         self.external_context_tree_items.clear()
         self.pasted_context_group = None
+        self.next_external_tree_id = 1
         children = self.file_tree.get_children()
         if children:
             self.file_tree.delete(*children)
         self.tree_paths.clear()
+        self.tree_directories.clear()
+        self.preview_path = None
         self.preview_image = None
         self.preview_image_label.configure(image="", text="")
         directory_nodes: dict[Path, str] = {root: ""}
@@ -230,6 +267,7 @@ class DeepbridCodeApp:
                 iid = f"d:{directory.relative_to(root).as_posix()}"
                 self.file_tree.insert(parent_iid, "end", iid=iid, text=directory.name, open=False)
                 directory_nodes[directory] = iid
+                self.tree_directories[iid] = directory
                 parent_iid = iid
             iid = f"f:{path.relative_to(root).as_posix()}"
             self.file_tree.insert(parent_iid, "end", iid=iid, text=path.name)
@@ -244,8 +282,10 @@ class DeepbridCodeApp:
             )
             return
         self.status.set(f"Opened {root}. Select files explicitly to add context.")
+        self._log(f"Opened project: {root}")
 
     def _startup(self) -> None:
+        self._startup_after_id = None
         if self.last_project:
             project = Path(self.last_project)
             if project.is_dir():
@@ -268,6 +308,9 @@ class DeepbridCodeApp:
                 self._set_dark_theme,
                 self.wrap_text,
                 self._set_wrap_text,
+                self.output_log_enabled,
+                self.output_log_path,
+                self._set_output_logging,
             )
         except (OSError, sqlite3.Error) as error:
             self.status.set(f"Could not open Settings: {error}")
@@ -282,6 +325,152 @@ class DeepbridCodeApp:
     def _set_wrap_text(self, enabled: bool) -> None:
         self.wrap_text = enabled
         self.preview.configure(wrap="word" if enabled else "none")
+
+    def _set_output_logging(self, enabled: bool, path: str) -> None:
+        normalized_path = str(Path(path).expanduser()) if path.strip() else ""
+        if enabled and not normalized_path:
+            raise ValueError("Choose a log file before enabling output logging.")
+        if enabled:
+            self._validate_output_log_path(normalized_path)
+        try:
+            self.settings.set(OUTPUT_LOG_PATH, normalized_path)
+            self.settings.set_bool(OUTPUT_LOG_ENABLED, enabled)
+        except (OSError, sqlite3.Error):
+            raise
+        self.output_log_path = normalized_path
+        self.output_log_enabled = enabled
+        self._log(
+            f"File logging enabled: {normalized_path}"
+            if enabled
+            else "File logging disabled."
+        )
+
+    @staticmethod
+    def _validate_output_log_path(path: str) -> None:
+        if not path.strip():
+            raise ValueError("Choose a log file before enabling output logging.")
+        log_path = Path(path).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8"):
+            pass
+
+    def _log(self, message: str) -> None:
+        line = f"{datetime.now().astimezone().isoformat(timespec='seconds')} {message}"
+        with self._log_lock:
+            self.console_history.append(line)
+            file_error_line: str | None = None
+            if self.output_log_enabled and self.output_log_path:
+                try:
+                    with Path(self.output_log_path).expanduser().open(
+                        "a",
+                        encoding="utf-8",
+                    ) as log_file:
+                        log_file.write(line + "\n")
+                except OSError as error:
+                    file_error_line = (
+                        f"{datetime.now().astimezone().isoformat(timespec='seconds')} "
+                        f"ERROR Could not write application log: {error}"
+                    )
+            self.console_events.put(line)
+            if file_error_line is not None:
+                self.console_history.append(file_error_line)
+                self.console_events.put(file_error_line)
+
+    def _report_callback_exception(
+        self,
+        exception_type: type[BaseException],
+        exception: BaseException,
+        exception_traceback: TracebackType | None,
+    ) -> None:
+        details = "".join(
+            traceback.format_exception(
+                exception_type,
+                exception,
+                exception_traceback,
+            )
+        ).rstrip()
+        self._log(f"Unhandled UI exception:\n{details}")
+
+    def _open_console(self) -> None:
+        if self.console_window is not None and self.console_window.winfo_exists():
+            self.console_window.deiconify()
+            self.console_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Deepbrid Code Console")
+        window.geometry("800x420")
+        window.minsize(480, 260)
+        window.transient(self.root)
+        controls = ttk.Frame(window, padding=(6, 6, 6, 0))
+        controls.pack(fill="x")
+        ttk.Button(controls, text="Clear", command=self._clear_console).pack(side="right")
+        output = tk.Text(window, wrap="word", state="disabled")
+        scrollbar = ttk.Scrollbar(window, orient="vertical", command=output.yview)
+        output.configure(yscrollcommand=scrollbar.set)
+        output.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.console_window = window
+        self.console_output = output
+        self._apply_console_theme()
+        with self._log_lock:
+            history = list(self.console_history)
+            while True:
+                try:
+                    self.console_events.get_nowait()
+                except queue.Empty:
+                    break
+        output.configure(state="normal")
+        if history:
+            output.insert("end", "\n".join(history) + "\n")
+        output.see("end")
+        output.configure(state="disabled")
+        window.protocol("WM_DELETE_WINDOW", self._close_console)
+
+    def _clear_console(self) -> None:
+        if self.console_output is None:
+            return
+        self.console_output.configure(state="normal")
+        self.console_output.delete("1.0", "end")
+        self.console_output.configure(state="disabled")
+
+    def _close_console(self) -> None:
+        if self.console_window is not None:
+            self.console_window.destroy()
+        self.console_window = None
+        self.console_output = None
+
+    def _apply_console_theme(self) -> None:
+        if self.console_output is None:
+            return
+        colors = self.theme_colors
+        self.console_output.configure(
+            background=colors["field"],
+            foreground=colors["foreground"],
+            insertbackground=colors["foreground"],
+            selectbackground=colors["selection"],
+        )
+
+    def _poll_console_events(self) -> None:
+        if self.console_output is None:
+            while not self.console_events.empty():
+                try:
+                    self.console_events.get_nowait()
+                except queue.Empty:
+                    break
+            return
+        while True:
+            try:
+                line = self.console_events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self.console_output.configure(state="normal")
+                self.console_output.insert("end", line + "\n")
+                self.console_output.see("end")
+                self.console_output.configure(state="disabled")
+            except tk.TclError:
+                self._close_console()
+                return
 
     def _apply_theme(self) -> None:
         if self.dark_theme:
@@ -395,6 +584,7 @@ class DeepbridCodeApp:
             spacing1=8,
             spacing3=8,
         )
+        self._apply_console_theme()
         self.file_context_menu.configure(
             background=colors["surface"],
             foreground=colors["foreground"],
@@ -415,11 +605,35 @@ class DeepbridCodeApp:
 
     def _show_file_context_menu(self, event: tk.Event) -> str:
         row = self.file_tree.identify_row(event.y)
-        if not row or row not in self.tree_paths:
+        if not row or (row not in self.tree_paths and row not in self.tree_directories):
             return "break"
         if row not in self.file_tree.selection():
             self.file_tree.selection_set(row)
             self.file_tree.focus(row)
+        if row in self.tree_directories:
+            self.file_context_menu.entryconfigure(
+                0,
+                label="Add text files in directory to context",
+                command=lambda path=self.tree_directories[row]: self._add_directory_context(path),
+                state="normal",
+            )
+            self.file_context_menu.entryconfigure(1, state="disabled")
+        else:
+            selected_rows = set(self.file_tree.selection())
+            has_selected_context = any(
+                tree_iid in selected_rows
+                for tree_iid in self.context_tree_iids.values()
+            )
+            self.file_context_menu.entryconfigure(
+                0,
+                label="Add selected to context",
+                command=self._add_context,
+                state="disabled" if row in self.external_context_tree_items else "normal",
+            )
+            self.file_context_menu.entryconfigure(
+                1,
+                state="normal" if has_selected_context else "disabled",
+            )
         self.file_context_menu.tk_popup(event.x_root, event.y_root)
         return "break"
 
@@ -439,6 +653,7 @@ class DeepbridCodeApp:
         path = self.tree_paths.get(selection[0])
         if path is None:
             return
+        self.preview_path = path
         try:
             kind = context_kind(path)
         except (OSError, ValueError) as error:
@@ -459,9 +674,11 @@ class DeepbridCodeApp:
                     raise ValueError(
                         f"Image exceeds the {MAX_IMAGE_PREVIEW_BYTES // (1024 * 1024)} MiB preview limit."
                     )
-                self.preview_image = tk.PhotoImage(file=str(path))
+                with Image.open(path) as image:
+                    image.thumbnail((220, 180))
+                    self.preview_image = ImageTk.PhotoImage(image.copy(), master=self.root)
                 self.preview_image_label.configure(image=self.preview_image, text="")
-            except (OSError, ValueError, tk.TclError) as error:
+            except (OSError, RuntimeError, ValueError, tk.TclError) as error:
                 self.preview_image = None
                 self.preview_image_label.configure(
                     image="",
@@ -516,6 +733,52 @@ class DeepbridCodeApp:
             candidates.append(ContextFile(resolved_path, kind, label=relative_path.as_posix()))
         self._include_context(candidates, skipped, errors)
 
+    def _add_directory_context(self, directory: Path) -> None:
+        if self.project_root is None:
+            self.status.set("Open a project folder first.")
+            return
+        try:
+            resolved_directory = directory.resolve(strict=True)
+            relative_directory = resolved_directory.relative_to(self.project_root)
+            files = list(iter_project_files(resolved_directory))
+        except (OSError, RuntimeError, ValueError) as error:
+            self.status.set(f"Could not inspect directory {directory.name}: {error}")
+            self._log(f"Could not inspect context directory {directory}: {error}")
+            return
+
+        candidates: list[ContextFile] = []
+        errors: list[str] = []
+        ignored_count = 0
+        for path in files:
+            try:
+                kind = context_kind(path)
+                if kind != "text":
+                    ignored_count += 1
+                    continue
+                resolved_path = path.resolve(strict=True)
+                relative_path = resolved_path.relative_to(self.project_root)
+            except (OSError, RuntimeError, ValueError) as error:
+                errors.append(f"{path.name}: {error}")
+                continue
+            candidates.append(
+                ContextFile(
+                    resolved_path,
+                    "text",
+                    label=relative_path.as_posix(),
+                )
+            )
+
+        skipped = []
+        if ignored_count:
+            skipped.append(f"Ignored {ignored_count} non-text file(s)")
+        if not candidates and not skipped and not errors:
+            skipped.append(f"No files found in {relative_directory.as_posix()}")
+        self._include_context(candidates, skipped, errors)
+        self._log(
+            f"Added text files from directory {relative_directory.as_posix()}: "
+            f"{len(candidates)} candidate(s), {ignored_count} non-text file(s) ignored."
+        )
+
     def _include_context(
         self,
         candidates: list[ContextFile],
@@ -533,6 +796,7 @@ class DeepbridCodeApp:
             self.context_order.append(key)
             self._mark_context_in_tree(key, item)
             added.append(item.path.name)
+            self._log(f"Added context: {item.label or item.path.name} ({item.kind}).")
         messages: list[str] = []
         if added:
             messages.append(
@@ -586,7 +850,7 @@ class DeepbridCodeApp:
             if iid is not None:
                 self.file_tree.item(
                     iid,
-                    text=f"* {item.path.name}",
+                    text=f"* {item.label or item.path.name}",
                 )
         if iid is not None:
             self.context_tree_iids[key] = iid
@@ -707,6 +971,12 @@ class DeepbridCodeApp:
                 self.file_tree.delete(iid)
             else:
                 self.file_tree.item(iid, text=item.path.name)
+            if self.preview_path == item.path:
+                self.preview_path = None
+                self.preview_image = None
+                self.preview_image_label.configure(image="", text="")
+                self._set_preview("")
+            self._log(f"Removed context: {item.label or item.path.name}.")
             removed += 1
         if self.pasted_context_group and not self.file_tree.get_children(
             self.pasted_context_group
@@ -747,6 +1017,10 @@ class DeepbridCodeApp:
             if item.kind == "image" and item.external
         ]
         self.chat_request_active = True
+        self._log(
+            f"Sending prompt with {len(self.context_files)} context item(s) "
+            f"and {len(image_paths)} image(s)."
+        )
         self._append_chat("You", prompt)
         if image_paths:
             self._append_chat("Images attached", "\n".join(path.name for path in image_paths))
@@ -781,8 +1055,10 @@ class DeepbridCodeApp:
                 external_image_paths,
             )
         except BrowserLaunchError as error:
+            self._log(f"Chat request failed: {error}")
             self.chat_events.put(("chat-error", str(error)))
         except (OSError, ValueError, RuntimeError) as error:
+            self._log(f"Chat operation failed: {error}")
             self.chat_events.put(("chat-error", f"Chat operation failed: {error}"))
         else:
             self.chat_events.put(("chat-success", response))
@@ -791,6 +1067,7 @@ class DeepbridCodeApp:
                 self._cleanup_clipboard_images()
 
     def _poll_chat_events(self) -> None:
+        self._poll_after_id = None
         while True:
             try:
                 event, content = self.chat_events.get_nowait()
@@ -803,18 +1080,36 @@ class DeepbridCodeApp:
                 self.browser_request_active = False
                 self._stop_progress()
             if event == "chat-success":
+                self._log(f"Deepbrid AI Chat returned {len(content)} characters.")
                 self._append_chat("Deepbrid AI", content)
                 self.status.set(f"Deepbrid AI Chat replied ({len(content)} characters).")
             elif event == "chat-error":
                 self._append_chat("Deepbrid AI Chat status", content)
                 self.status.set(content)
             elif event == "browser-chat":
+                self._log("Deepbrid AI Chat is open and ready.")
                 self.status.set("Deepbrid AI Chat is open and ready.")
             elif event == "browser-login":
+                self._log("Chrome is open to Deepbrid login.")
                 self.status.set("Chrome is open to Deepbrid login. Sign in, then send your message.")
             elif event == "browser-error":
                 self.status.set(content)
-        self.root.after(200, self._poll_chat_events)
+        self._poll_console_events()
+        self._poll_after_id = self.root.after(200, self._poll_chat_events)
+
+    def _on_root_destroy(self, event: tk.Event) -> None:
+        if event.widget is not self.root:
+            return
+        for callback_id in (self._poll_after_id, self._startup_after_id):
+            if callback_id is not None:
+                try:
+                    self.root.after_cancel(callback_id)
+                except tk.TclError:
+                    pass
+        self._poll_after_id = None
+        self._startup_after_id = None
+        if self.root.report_callback_exception == self._report_callback_exception:
+            self.root.report_callback_exception = self._previous_callback_exception
 
     def _append_chat(self, speaker: str, content: str) -> None:
         self.chat_output.configure(state="normal")
@@ -859,15 +1154,19 @@ class DeepbridCodeApp:
         try:
             landing_page = self.chat_browser.open_for_chat()
         except (BrowserLaunchError, OSError, RuntimeError) as error:
+            self._log(f"Could not open Deepbrid AI Chat: {error}")
             self.chat_events.put(("browser-error", f"Could not open Deepbrid AI Chat: {error}"))
         else:
             self.chat_events.put((f"browser-{landing_page}", ""))
 
     def _close(self) -> None:
+        self._log("Deepbrid Code is closing.")
         if self.chat_request_active:
             self.cleanup_clipboard_after_chat = True
         else:
             self._cleanup_clipboard_images()
+        if self.console_window is not None:
+            self._close_console()
         self.root.destroy()
 
     def _cleanup_clipboard_images(self) -> None:
