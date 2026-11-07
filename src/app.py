@@ -144,8 +144,9 @@ class DeepbridCodeApp:
             messagebox.showerror("Could not open folder", f"{root} is not a folder.")
             return
         try:
+            root = root.resolve(strict=True)
             entries = list(iter_project_files(root))
-        except OSError as error:
+        except (OSError, RuntimeError) as error:
             messagebox.showerror("Could not open folder", str(error))
             return
         self.project_root = root
@@ -176,7 +177,6 @@ class DeepbridCodeApp:
             self.tree_paths[iid] = path
         self.project_label.configure(text=str(root))
         self._set_preview("")
-        self.project_root = root.resolve()
         try:
             self.settings.set(LAST_PROJECT, str(self.project_root))
         except (OSError, sqlite3.Error) as error:
