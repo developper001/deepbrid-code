@@ -8,6 +8,7 @@ from typing import Callable, Protocol
 from .settings import (
     AUTO_OPEN_CHROME,
     DARK_THEME,
+    DIAGNOSTICS_ENABLED,
     REMOVE_IMAGES_AFTER_SEND,
     WRAP_TEXT,
 )
@@ -30,6 +31,8 @@ class SettingsDialog:
         on_wrap_text_changed: Callable[[bool], None],
         remove_images_after_send: bool,
         on_remove_images_after_send_changed: Callable[[bool], None],
+        diagnostics_enabled: bool,
+        on_diagnostics_enabled_changed: Callable[[bool], None],
         output_log_path: str,
         on_output_logging_changed: Callable[[str], None],
     ) -> None:
@@ -38,11 +41,12 @@ class SettingsDialog:
         self.on_dark_theme_changed = on_dark_theme_changed
         self.on_wrap_text_changed = on_wrap_text_changed
         self.on_remove_images_after_send_changed = on_remove_images_after_send_changed
+        self.on_diagnostics_enabled_changed = on_diagnostics_enabled_changed
         self.on_output_logging_changed = on_output_logging_changed
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Settings")
-        self.dialog.geometry("640x520")
-        self.dialog.minsize(560, 460)
+        self.dialog.geometry("640x560")
+        self.dialog.minsize(560, 500)
         self.dialog.transient(parent)
 
         frame = ttk.Frame(self.dialog, padding=16)
@@ -143,17 +147,30 @@ class SettingsDialog:
         )
         self.output_log_status = tk.StringVar(master=self.dialog)
         self.output_log_status.set(
-            "Console output is appended to this file."
-            if output_log_path
-            else "File logging is disabled."
+            "Diagnostics are enabled for this file."
+            if diagnostics_enabled and output_log_path.strip()
+            else "Choose a file path to enable diagnostics logging."
+            if diagnostics_enabled
+            else "Diagnostics file logging is disabled."
         )
-        ttk.Label(content, text="Log file path (empty disables file logging)").grid(
-            row=10,
+        self.diagnostics_enabled = tk.BooleanVar(
+            master=self.dialog,
+            value=diagnostics_enabled,
+        )
+        ttk.Checkbutton(
+            content,
+            text="Enable diagnostics file logging",
+            variable=self.diagnostics_enabled,
+            command=self._save_diagnostics_enabled,
+        ).grid(row=10, column=0, sticky="w")
+        ttk.Label(content, text="Diagnostics file path (kept when logging is disabled)").grid(
+            row=11,
             column=0,
             sticky="w",
+            pady=(6, 0),
         )
         log_path_controls = ttk.Frame(content)
-        log_path_controls.grid(row=11, column=0, sticky="ew", pady=(6, 0))
+        log_path_controls.grid(row=12, column=0, sticky="ew", pady=(6, 0))
         log_path_controls.columnconfigure(0, weight=1)
         ttk.Entry(
             log_path_controls,
@@ -174,14 +191,18 @@ class SettingsDialog:
             text="Clear",
             command=self._clear_output_log_path,
         ).grid(row=0, column=3, padx=(8, 0))
-        ttk.Label(content, textvariable=self.output_log_status).grid(
-            row=12,
+        self.output_log_status_label = ttk.Label(
+            content,
+            textvariable=self.output_log_status,
+        )
+        self.output_log_status_label.grid(
+            row=13,
             column=0,
             sticky="w",
             pady=(4, 0),
         )
         ttk.Label(content, textvariable=self.status).grid(
-            row=13,
+            row=14,
             column=0,
             sticky="w",
             pady=(8, 0),
@@ -197,6 +218,7 @@ class SettingsDialog:
         self.saved_dark_theme = dark_theme
         self.saved_wrap_text = wrap_text
         self.saved_remove_images_after_send = remove_images_after_send
+        self.saved_diagnostics_enabled = diagnostics_enabled
         self.saved_output_log_path = output_log_path
 
     def _save(self) -> None:
@@ -250,6 +272,37 @@ class SettingsDialog:
         self.on_remove_images_after_send_changed(enabled)
         self.status.set("Saved.")
 
+    def _save_diagnostics_enabled(self) -> None:
+        enabled = self.diagnostics_enabled.get()
+        try:
+            self.settings.set_bool(DIAGNOSTICS_ENABLED, enabled)
+            self.on_diagnostics_enabled_changed(enabled)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            self.diagnostics_enabled.set(self.saved_diagnostics_enabled)
+            try:
+                self.settings.set_bool(
+                    DIAGNOSTICS_ENABLED,
+                    self.saved_diagnostics_enabled,
+                )
+            except (OSError, sqlite3.Error) as rollback_error:
+                self.status.set(
+                    f"Could not save diagnostics setting: {error}; "
+                    f"could not restore its previous value: {rollback_error}"
+                )
+                return
+            self.status.set(f"Could not save diagnostics setting: {error}")
+            return
+        self.saved_diagnostics_enabled = enabled
+        if enabled and not self.output_log_path.get().strip():
+            self.output_log_status.set("Choose a file path to enable diagnostics logging.")
+        else:
+            self.output_log_status.set(
+                "Diagnostics are enabled for this file."
+                if enabled
+                else "Diagnostics file logging is disabled."
+            )
+        self.status.set("Saved.")
+
     def _save_output_logging(self) -> None:
         path = self.output_log_path.get()
         try:
@@ -260,9 +313,11 @@ class SettingsDialog:
             return
         self.saved_output_log_path = path
         self.output_log_status.set(
-            "Console output is appended to the selected file."
-            if path.strip()
-            else "File logging is disabled."
+            "Diagnostics are enabled for this file."
+            if self.diagnostics_enabled.get() and path.strip()
+            else "Choose a file path to enable diagnostics logging."
+            if self.diagnostics_enabled.get()
+            else "Diagnostics file logging is disabled."
         )
 
     def _browse_output_log(self) -> None:

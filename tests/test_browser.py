@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
-from src.browser import DeepbridChatBrowser
+from src.browser import ChatSession, DeepbridChatBrowser
 
 
 class FakeWebSocket:
@@ -124,6 +124,7 @@ class BrowserFileUploadTests(unittest.TestCase):
                 "_evaluate",
                 side_effect=[
                     {"ready": True},
+                    {"configured": True},
                     {"sent": True, "assistantCount": 1},
                     {"assistantCount": 2, "busy": False, "response": "Done"},
                 ],
@@ -141,6 +142,51 @@ class BrowserFileUploadTests(unittest.TestCase):
 
         self.assertEqual(response, "Done")
         self.assertEqual(sequence, ["accepted", "submitted"])
+
+    def test_chat_settings_are_applied_before_submission(self) -> None:
+        browser = DeepbridChatBrowser(Path("profile"))
+        with patch.object(
+            browser,
+            "_evaluate",
+            return_value={
+                "configured": True,
+                "model": "gpt-6-luna",
+                "mode": "Document Analyst",
+                "webEnabled": True,
+            },
+        ) as evaluate:
+            browser._configure_chat(
+                "ws://127.0.0.1:9222/devtools/page/test",
+                "GPT-6 Luna · Fast",
+                "Document Analyst",
+                True,
+            )
+        script = evaluate.call_args.args[1]
+        self.assertIn("GPT-6 Luna", script)
+        self.assertIn("Document Analyst", script)
+        self.assertIn("webEnabled=true", script)
+
+    def test_session_list_maps_visible_session_rows(self) -> None:
+        browser = DeepbridChatBrowser(Path("profile"))
+        with (
+            patch.object(browser, "_chat_websocket_url", return_value="ws://127.0.0.1:9222/devtools/page/test"),
+            patch.object(
+                browser,
+                "_evaluate",
+                return_value=[
+                    {
+                        "id": "42",
+                        "title": "Project notes",
+                        "updated": "Today",
+                        "active": True,
+                    }
+                ],
+            ),
+        ):
+            self.assertEqual(
+                browser.list_sessions(),
+                [ChatSession("42", "Project notes", "Today", True)],
+            )
 
     def test_submission_wait_reports_if_prompt_was_not_accepted(self) -> None:
         browser = DeepbridChatBrowser(Path("profile"))

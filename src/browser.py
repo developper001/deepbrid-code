@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 import json
 import os
 import shutil
@@ -24,6 +25,14 @@ DEBUG_PORT_FILE = "DeepbridDevToolsPort"
 DEBUGGER_TIMEOUT = 20
 RESPONSE_TIMEOUT = 120
 MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ChatSession:
+    session_id: str
+    title: str
+    updated: str
+    active: bool
 
 
 class BrowserLaunchError(RuntimeError):
@@ -154,6 +163,9 @@ class DeepbridChatBrowser:
         project_root: Path | None = None,
         external_attachment_paths: list[Path] | None = None,
         on_submitted: Callable[[], None] | None = None,
+        model: str = "GPT-6.1 Sol · Best",
+        mode: str = "Code Assistant",
+        web_enabled: bool = False,
     ) -> str:
         if not prompt.strip():
             raise BrowserLaunchError("The prompt is empty; nothing was sent.")
@@ -170,6 +182,7 @@ class DeepbridChatBrowser:
                 if isinstance(error, str)
                 else "Sign in to Deepbrid AI Chat in the dedicated Chrome window, then retry."
             )
+        self._configure_chat(websocket_url, model, mode, web_enabled)
         attachments = attachment_paths or []
         try:
             external_attachments = {
@@ -237,6 +250,139 @@ class DeepbridChatBrowser:
         raise BrowserLaunchError(
             "Deepbrid AI Chat did not accept the message. The prompt is still in the "
             "composer; check the attachment and try sending again."
+        )
+
+    def list_sessions(self) -> list[ChatSession]:
+        websocket_url = self._chat_websocket_url()
+        result = self._evaluate(websocket_url, self._list_sessions_script())
+        if not isinstance(result, list):
+            raise BrowserLaunchError("Deepbrid AI Chat returned an invalid session list.")
+        sessions: list[ChatSession] = []
+        for item in result:
+            if not isinstance(item, dict):
+                raise BrowserLaunchError("Deepbrid AI Chat returned an invalid session.")
+            session_id = item.get("id")
+            title = item.get("title")
+            updated = item.get("updated")
+            active = item.get("active")
+            if (
+                not isinstance(session_id, str)
+                or not session_id
+                or not isinstance(title, str)
+                or not isinstance(updated, str)
+                or not isinstance(active, bool)
+            ):
+                raise BrowserLaunchError("Deepbrid AI Chat returned incomplete session data.")
+            sessions.append(ChatSession(session_id, title, updated, active))
+        return sessions
+
+    def open_session(self, session_id: str) -> None:
+        websocket_url = self._chat_websocket_url()
+        result = self._evaluate(websocket_url, self._open_session_script(session_id))
+        if not isinstance(result, dict) or result.get("opened") is not True:
+            raise BrowserLaunchError("Could not open the selected Deepbrid chat session.")
+
+    def new_chat(self) -> None:
+        websocket_url = self._chat_websocket_url()
+        result = self._evaluate(websocket_url, self._new_chat_script())
+        if not isinstance(result, dict) or result.get("opened") is not True:
+            raise BrowserLaunchError("Could not start a new Deepbrid chat.")
+
+    def _chat_websocket_url(self) -> str:
+        port = self._wait_for_debug_port()
+        target = self._find_chat_target(port)
+        if target is None:
+            raise BrowserLaunchError(
+                'Open the dedicated Chrome window and sign in before using "Sessions".'
+            )
+        websocket_url = target.get("webSocketDebuggerUrl")
+        if not isinstance(websocket_url, str):
+            raise BrowserLaunchError("The Deepbrid chat tab has no DevTools connection.")
+        return websocket_url
+
+    def _configure_chat(
+        self,
+        websocket_url: str,
+        model: str,
+        mode: str,
+        web_enabled: bool,
+    ) -> None:
+        result = self._evaluate(
+            websocket_url,
+            self._configure_chat_script(model, mode, web_enabled),
+        )
+        if not isinstance(result, dict) or result.get("configured") is not True:
+            error = result.get("error") if isinstance(result, dict) else None
+            raise BrowserLaunchError(
+                str(error) if isinstance(error, str) else "Could not apply chat model and mode."
+            )
+
+    @staticmethod
+    def _configure_chat_script(model: str, mode: str, web_enabled: bool) -> str:
+        return (
+            "(()=>{"
+            "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));"
+            "const select=document.querySelector('select[aria-label=\"Model\"]');"
+            "if(!select)return {error:'Deepbrid AI Chat does not expose a model selector.'};"
+            f"const model={json.dumps(model)};"
+            "const option=[...select.options].find(o=>o.value===model||o.textContent.trim()===model);"
+            "if(!option)return {error:'The selected AI model is no longer available in Deepbrid.'};"
+            "if(select.value!==option.value){select.value=option.value;"
+            "select.dispatchEvent(new Event('input',{bubbles:true}));"
+            "select.dispatchEvent(new Event('change',{bubbles:true}));}"
+            f"const mode={json.dumps(mode)};"
+            "const modeButton=document.querySelector('.dfy-head-sub');"
+            "if(!modeButton)return {error:'Deepbrid AI Chat does not expose a mode selector.'};"
+            "if(modeButton.innerText.trim()!==mode){"
+            "modeButton.click();"
+            "const menu=document.querySelector('.dfy-pop[role=\"menu\"]');"
+            "const modeOption=menu&&[...menu.querySelectorAll('button[role=\"menuitem\"]')]"
+            ".find(b=>b.innerText.trim()===mode);"
+            "if(!modeOption)return {error:'The selected chat mode is no longer available in Deepbrid.'};"
+            "modeOption.click();}"
+            "const web=document.querySelector('.dfy-head-tools .dfy-toggle[title*=\"web\"]')"
+            "||document.querySelector('.dfy-head-tools .dfy-toggle');"
+            "if(!web)return {error:'Deepbrid AI Chat does not expose Web search.'};"
+            f"const webEnabled={json.dumps(web_enabled)};"
+            "if((web.getAttribute('aria-pressed')==='true')!==webEnabled)web.click();"
+            "return {configured:true,model:select.value,mode:modeButton.innerText.trim(),"
+            "webEnabled:web.getAttribute('aria-pressed')==='true'};"
+            "})()"
+        )
+
+    @staticmethod
+    def _list_sessions_script() -> str:
+        return (
+            "(()=>{"
+            "const list=document.querySelector('.dfy-list');"
+            "if(!list)return {error:'The Deepbrid session list is not available.'};"
+            "return [...list.querySelectorAll('.dfy-item[data-id]')].map(item=>({"
+            "id:item.dataset.id,"
+            "title:item.querySelector('.dfy-item-title')?.textContent?.trim()||"
+            "item.querySelector('.dfy-item-main')?.title||'Untitled chat',"
+            "updated:item.querySelector('.dfy-item-time')?.textContent?.trim()||"
+            "item.closest('.dfy-group')?.querySelector('.dfy-group-label')?.textContent?.trim()||'',"
+            "active:item.classList.contains('is-active')"
+            "}));"
+            "})()"
+        )
+
+    @staticmethod
+    def _open_session_script(session_id: str) -> str:
+        return (
+            "(()=>{const id="
+            + json.dumps(session_id)
+            + ";const item=[...document.querySelectorAll('.dfy-item[data-id]')]"
+            ".find(e=>e.dataset.id===id);"
+            "const button=item?.querySelector('.dfy-item-main');"
+            "if(!button)return {opened:false};button.click();return {opened:true};})()"
+        )
+
+    @staticmethod
+    def _new_chat_script() -> str:
+        return (
+            "(()=>{const button=document.querySelector('.dfy-new');"
+            "if(!button)return {opened:false};button.click();return {opened:true};})()"
         )
 
     def _wait_for_debug_port(self) -> int:

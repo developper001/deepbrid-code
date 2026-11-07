@@ -11,10 +11,12 @@ from unittest.mock import patch
 from PIL import Image
 
 from src.app import DeepbridCodeApp
+from src.browser import ChatSession
 from src.context import build_prompt
 from src.settings import (
     AUTO_OPEN_CHROME,
     DARK_THEME,
+    DIAGNOSTICS_ENABLED,
     LAST_PROJECT,
     OUTPUT_LOG_PATH,
     REMOVE_IMAGES_AFTER_SEND,
@@ -86,6 +88,26 @@ class AppStartupTests(unittest.TestCase):
                     self.assertEqual(app.file_tree.master.grid_rowconfigure(1, "weight"), 0)
                     self.assertEqual(app.file_tree.master.grid_rowconfigure(4, "weight"), 1)
                     self.assertEqual(app.console_toggle_button.cget("text"), "Toggle Console")
+                    action_buttons = app.console_toggle_button.master.pack_slaves()
+                    self.assertLess(
+                        action_buttons.index(app.console_toggle_button),
+                        action_buttons.index(app.add_files_button),
+                    )
+                    self.assertLess(
+                        action_buttons.index(app.model_selector),
+                        action_buttons.index(app.send_button),
+                    )
+                    self.assertEqual(app.ai_mode, "Code Assistant")
+                    self.assertEqual(app.mode_selector.get(), "Code Assistant")
+                    self.assertFalse(app.web_enabled)
+                    self.assertEqual(
+                        app.output_log_path,
+                        str(Path(__file__).resolve().parents[1] / "diagnostics" / "deepbrid-code.log"),
+                    )
+                    self.assertFalse(app.diagnostics_enabled)
+                    self.assertFalse(app.output_log_enabled)
+                    self.assertFalse(hasattr(app, "project_label"))
+                    self.assertEqual(app.sessions_button.cget("text"), "Sessions")
                     self.assertEqual(app.send_button.cget("text"), "Send")
                     self.assertEqual(app.send_button.pack_info()["side"], "right")
                     with patch.object(app.main_pane, "winfo_height", return_value=600):
@@ -556,6 +578,8 @@ class AppStartupTests(unittest.TestCase):
                         app._set_wrap_text,
                         app.remove_images_after_send,
                         app._set_remove_images_after_send,
+                        app.diagnostics_enabled,
+                        app._set_diagnostics_enabled,
                         app.output_log_path,
                         app._set_output_logging,
                     )
@@ -566,9 +590,13 @@ class AppStartupTests(unittest.TestCase):
                     dialog.remove_images_after_send.set(False)
                     dialog._save_remove_images_after_send()
                     self.assertFalse(hasattr(dialog, "output_log_enabled"))
+                    self.assertFalse(app.diagnostics_enabled)
                     log_path = root_path / "diagnostics.log"
                     dialog.output_log_path.set(str(log_path))
                     dialog._save_output_logging()
+                    self.assertFalse(app.output_log_enabled)
+                    dialog.diagnostics_enabled.set(True)
+                    dialog._save_diagnostics_enabled()
                     self.assertTrue(app.output_log_enabled)
                     self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), str(log_path))
                     dialog._clear_output_log_path()
@@ -582,7 +610,9 @@ class AppStartupTests(unittest.TestCase):
                     app.settings.get_bool(REMOVE_IMAGES_AFTER_SEND, default=True)
                 )
                 self.assertFalse(app.output_log_enabled)
+                self.assertTrue(app.diagnostics_enabled)
                 self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), "")
+                self.assertTrue(app.settings.get_bool(DIAGNOSTICS_ENABLED, default=False))
                 self.assertEqual(dialog.status.get(), "Saved.")
                 dialog.dialog.destroy()
             finally:
@@ -601,6 +631,8 @@ class AppStartupTests(unittest.TestCase):
                 ):
                     app = DeepbridCodeApp(root)
                     app._set_output_logging(str(log_path))
+                    self.assertFalse(app.output_log_enabled)
+                    app._set_diagnostics_enabled(True)
                     app._log("A diagnostic message")
                     app._toggle_console()
 
@@ -625,6 +657,61 @@ class AppStartupTests(unittest.TestCase):
                         "Not written to file",
                         log_path.read_text(encoding="utf-8"),
                     )
+            finally:
+                root.destroy()
+
+    def test_sessions_modal_lists_searches_and_opens_loaded_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    with patch.object(app, "_start_sessions_request") as request:
+                        app._open_sessions()
+                    request.assert_called_once_with("list")
+                    app.sessions = [
+                        ChatSession("23", "Code review", "Today", True),
+                        ChatSession("24", "Research", "Yesterday", False),
+                    ]
+                    app._filter_sessions()
+                    self.assertEqual(len(app.session_rows), 2)
+                    app.sessions_filter.set("research")
+                    self.assertEqual(len(app.session_rows), 1)
+                    row, session = next(iter(app.session_rows.items()))
+                    self.assertEqual(session.session_id, "24")
+                    app.sessions_tree.selection_set(row)
+                    with patch.object(app, "_start_sessions_request") as open_request:
+                        app._open_selected_session()
+                    open_request.assert_called_once_with("open", "24")
+                    app._close_sessions()
+                    self.assertIsNone(app.sessions_window)
+            finally:
+                root.destroy()
+
+    def test_model_mode_web_defaults_and_send_state_are_wired(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app.message.insert("1.0", "Review")
+                    with patch("src.app.threading.Thread") as thread:
+                        app._send()
+                    args = thread.call_args.kwargs["args"]
+                    self.assertEqual(args[-3:], ("GPT-6.1 Sol · Best", "Code Assistant", False))
+                    self.assertEqual(app.model_selector.get(), "GPT-6.1 Sol · Best")
+                    self.assertEqual(app.mode_selector.get(), "Code Assistant")
+                    self.assertFalse(app.web_var.get())
             finally:
                 root.destroy()
 

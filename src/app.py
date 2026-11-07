@@ -15,7 +15,7 @@ from types import TracebackType
 
 from PIL import Image, ImageGrab, ImageTk
 
-from .browser import BrowserLaunchError, DeepbridChatBrowser
+from .browser import BrowserLaunchError, ChatSession, DeepbridChatBrowser
 from .context import (
     ContextFile,
     build_prompt,
@@ -30,6 +30,7 @@ from .logo import create_brand_icon
 from .settings import (
     AUTO_OPEN_CHROME,
     DARK_THEME,
+    DIAGNOSTICS_ENABLED,
     LAST_PROJECT,
     OUTPUT_LOG_PATH,
     REMOVE_IMAGES_AFTER_SEND,
@@ -42,8 +43,26 @@ APP_DATA_DIR = Path(
     os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 ) / "Deepbrid Code"
 SETTINGS_DATABASE = APP_DATA_DIR / "settings.sqlite3"
+APP_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT_LOG_PATH = APP_ROOT / "diagnostics" / "deepbrid-code.log"
 MAX_IMAGE_PREVIEW_BYTES = 20 * 1024 * 1024
 APP_ICON_PATH = Path(__file__).parent / "assets" / "deepbrid-code.ico"
+AI_MODELS = (
+    "GPT-6.1 Sol · Best",
+    "GPT-6 Luna · Fast",
+    "Grok 4.7",
+    "Gemini 3.8 Flash · Fast",
+    "Gemini 4 Argon",
+)
+AI_MODES = (
+    "Code Assistant",
+    "Document Analyst",
+    "Writing Partner",
+    "Patient Tutor",
+    "Summarizer",
+    "Brainstormer",
+    "Email Helper",
+)
 
 
 class DeepbridCodeApp:
@@ -60,8 +79,19 @@ class DeepbridCodeApp:
             REMOVE_IMAGES_AFTER_SEND,
             default=True,
         )
-        self.output_log_path = self.settings.get(OUTPUT_LOG_PATH) or ""
-        self.output_log_enabled = bool(self.output_log_path.strip())
+        saved_log_path = self.settings.get(OUTPUT_LOG_PATH)
+        self.output_log_path = (
+            str(DEFAULT_OUTPUT_LOG_PATH)
+            if saved_log_path is None
+            else saved_log_path
+        )
+        self.diagnostics_enabled = self.settings.get_bool(
+            DIAGNOSTICS_ENABLED,
+            default=False,
+        )
+        self.output_log_enabled = (
+            self.diagnostics_enabled and bool(self.output_log_path.strip())
+        )
         self.last_project = self.settings.get(LAST_PROJECT)
         self.project_root: Path | None = None
         self.tree_paths: dict[str, Path] = {}
@@ -82,6 +112,17 @@ class DeepbridCodeApp:
         self.pending_remove_images_after_send = True
         self.chat_browser = DeepbridChatBrowser(APP_DATA_DIR / "chrome-profile")
         self.chat_events: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.sessions_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.sessions_window: tk.Toplevel | None = None
+        self.sessions_tree: ttk.Treeview | None = None
+        self.sessions_status: tk.StringVar | None = None
+        self.sessions_filter = tk.StringVar(master=self.root)
+        self.sessions: list[ChatSession] = []
+        self.session_rows: dict[str, ChatSession] = {}
+        self.sessions_request_active = False
+        self.ai_model = AI_MODELS[0]
+        self.ai_mode = AI_MODES[0]
+        self.web_enabled = False
         self.console_events: queue.Queue[str] = queue.Queue()
         self.console_history: deque[str] = deque(maxlen=2000)
         self.console_output: tk.Text | None = None
@@ -99,13 +140,13 @@ class DeepbridCodeApp:
         self._apply_theme()
         self.root.report_callback_exception = self._report_callback_exception
         self.root.bind("<Destroy>", self._on_root_destroy, add="+")
-        if self.output_log_path:
+        if self.output_log_enabled:
             try:
                 self._validate_output_log_path(self.output_log_path)
             except (OSError, ValueError) as error:
-                self.output_log_path = ""
-                self.status.set(f"Could not enable saved log file: {error}")
-                self._log(f"Could not enable saved log file: {error}")
+                self.output_log_enabled = False
+                self.status.set(f"Could not enable diagnostics file logging: {error}")
+                self._log(f"Could not enable diagnostics file logging: {error}")
         self._log("Deepbrid Code started.")
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self._poll_after_id = self.root.after(200, self._poll_chat_events)
@@ -126,17 +167,21 @@ class DeepbridCodeApp:
             side="left",
             padx=(8, 0),
         )
-        self.console_toggle_button = ttk.Button(
-            toolbar,
-            text="Toggle Console",
-            command=self._toggle_console,
-        )
-        self.console_toggle_button.pack(
+        self.sessions_button = ttk.Button(toolbar, text="Sessions", command=self._open_sessions)
+        self.sessions_button.pack(
             side="left",
             padx=(8, 0),
         )
-        self.project_label = ttk.Label(toolbar, text="No project open")
-        self.project_label.pack(side="left", padx=12)
+        ttk.Label(toolbar, text="Mode").pack(side="left", padx=(16, 4))
+        self.mode_selector = ttk.Combobox(
+            toolbar,
+            state="readonly",
+            values=AI_MODES,
+            width=20,
+        )
+        self.mode_selector.set(self.ai_mode)
+        self.mode_selector.pack(side="left")
+        self.mode_selector.bind("<<ComboboxSelected>>", self._mode_changed)
 
         self.workspace = ttk.Panedwindow(self.root, orient="vertical")
         self.workspace.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -243,12 +288,36 @@ class DeepbridCodeApp:
         self.message.bind("<Control-Return>", self._insert_message_newline)
         actions = ttk.Frame(chat_panel)
         actions.pack(fill="x")
+        self.console_toggle_button = ttk.Button(
+            actions,
+            text="Toggle Console",
+            command=self._toggle_console,
+        )
+        self.console_toggle_button.pack(side="left", pady=(4, 0))
         self.add_files_button = ttk.Button(
             actions,
             text="Add files...",
             command=self._add_additional_files,
         )
-        self.add_files_button.pack(side="left", pady=(4, 0))
+        self.add_files_button.pack(side="left", padx=(8, 0), pady=(4, 0))
+        self.model_selector = ttk.Combobox(
+            actions,
+            state="readonly",
+            values=AI_MODELS,
+            width=22,
+        )
+        self.model_selector.set(self.ai_model)
+        self.model_selector.pack(side="left", padx=(12, 0), pady=(4, 0))
+        self.model_selector.bind("<<ComboboxSelected>>", self._model_changed)
+        self.web_var = tk.BooleanVar(master=self.root, value=False)
+        self.web_button = ttk.Checkbutton(
+            actions,
+            text="Web",
+            variable=self.web_var,
+            command=self._web_changed,
+            style="Toolbutton",
+        )
+        self.web_button.pack(side="left", padx=(8, 0), pady=(4, 0))
         self.send_button = ttk.Button(actions, text="Send", command=self._send)
         self.send_button.pack(
             side="right",
@@ -390,7 +459,6 @@ class DeepbridCodeApp:
             iid = f"f:{path.relative_to(root).as_posix()}"
             self.file_tree.insert(parent_iid, "end", iid=iid, text=path.name)
             self.tree_paths[iid] = path
-        self.project_label.configure(text=str(root))
         self._set_preview("")
         try:
             self.settings.set(LAST_PROJECT, str(self.project_root))
@@ -428,6 +496,8 @@ class DeepbridCodeApp:
                 self._set_wrap_text,
                 self.remove_images_after_send,
                 self._set_remove_images_after_send,
+                self.diagnostics_enabled,
+                self._set_diagnostics_enabled,
                 self.output_log_path,
                 self._set_output_logging,
             )
@@ -448,21 +518,243 @@ class DeepbridCodeApp:
     def _set_remove_images_after_send(self, enabled: bool) -> None:
         self.remove_images_after_send = enabled
 
+    def _mode_changed(self, _event: tk.Event) -> None:
+        self.ai_mode = self.mode_selector.get()
+
+    def _model_changed(self, _event: tk.Event) -> None:
+        self.ai_model = self.model_selector.get()
+
+    def _web_changed(self) -> None:
+        self.web_enabled = self.web_var.get()
+
+    def _set_diagnostics_enabled(self, enabled: bool) -> None:
+        normalized_path = self.output_log_path.strip()
+        if enabled and normalized_path:
+            self._validate_output_log_path(normalized_path)
+        self.diagnostics_enabled = enabled
+        self.output_log_enabled = enabled and bool(normalized_path)
+        self._log(
+            "Diagnostics file logging enabled."
+            if self.output_log_enabled
+            else "Diagnostics file logging disabled."
+        )
+
     def _set_output_logging(self, path: str) -> None:
         normalized_path = str(Path(path).expanduser()) if path.strip() else ""
-        if normalized_path:
+        if self.diagnostics_enabled and normalized_path:
             self._validate_output_log_path(normalized_path)
         try:
             self.settings.set(OUTPUT_LOG_PATH, normalized_path)
         except (OSError, sqlite3.Error):
             raise
         self.output_log_path = normalized_path
-        self.output_log_enabled = bool(normalized_path)
+        self.output_log_enabled = self.diagnostics_enabled and bool(normalized_path)
         self._log(
-            f"File logging enabled: {normalized_path}"
+            f"Diagnostics file path set to: {normalized_path}"
             if normalized_path
-            else "File logging disabled."
+            else "Diagnostics file path cleared; file logging is disabled."
         )
+
+    def _open_sessions(self) -> None:
+        if self.sessions_window is not None:
+            try:
+                if self.sessions_window.winfo_exists():
+                    self.sessions_window.lift()
+                    self._refresh_sessions()
+                    return
+            except tk.TclError:
+                pass
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Sessions")
+        dialog.geometry("560x460")
+        dialog.minsize(460, 340)
+        dialog.transient(self.root)
+        self.sessions_window = dialog
+        self.sessions_filter.set("")
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
+        ttk.Label(frame, text="Search sessions").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        search = ttk.Entry(frame, textvariable=self.sessions_filter)
+        search.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+        tree = ttk.Treeview(
+            frame,
+            columns=("title", "updated"),
+            show="headings",
+            selectmode="browse",
+        )
+        tree.heading("title", text="Session")
+        tree.heading("updated", text="Updated")
+        tree.column("title", width=360, anchor="w")
+        tree.column("updated", width=140, anchor="w")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=2, column=0, sticky="nsew")
+        scrollbar.grid(row=2, column=1, sticky="ns")
+        tree.bind("<Double-1>", lambda _event: self._open_selected_session())
+        self.sessions_tree = tree
+        self.session_rows.clear()
+        self.sessions_status = tk.StringVar(master=dialog, value="Loading sessions...")
+        ttk.Label(frame, textvariable=self.sessions_status).grid(
+            row=3,
+            column=0,
+            sticky="w",
+            pady=(6, 0),
+        )
+        actions = ttk.Frame(frame)
+        actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            actions,
+            text="Refresh",
+            command=self._refresh_sessions,
+        ).pack(side="left")
+        ttk.Button(
+            actions,
+            text="New chat",
+            command=self._start_new_chat,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="Open",
+            command=self._open_selected_session,
+        ).pack(side="right")
+        ttk.Button(
+            actions,
+            text="Close",
+            command=self._close_sessions,
+        ).pack(side="right", padx=(0, 8))
+        self.sessions_filter.trace_add("write", self._filter_sessions)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_sessions)
+        dialog.bind("<Destroy>", self._on_sessions_dialog_destroy, add="+")
+        dialog.grab_set()
+        self._refresh_sessions()
+
+    def _on_sessions_dialog_destroy(self, event: tk.Event) -> None:
+        if self.sessions_window is not None and event.widget is self.sessions_window:
+            self.sessions_window = None
+            self.sessions_tree = None
+            self.sessions_status = None
+            self.session_rows.clear()
+
+    def _close_sessions(self) -> None:
+        if self.sessions_window is not None:
+            self.sessions_window.destroy()
+
+    def _filter_sessions(self, *_args: object) -> None:
+        tree = self.sessions_tree
+        if tree is None:
+            return
+        query = self.sessions_filter.get().casefold().strip()
+        tree.delete(*tree.get_children())
+        self.session_rows.clear()
+        row_number = 0
+        for session in self.sessions:
+            if query and query not in session.title.casefold() and query not in session.updated.casefold():
+                continue
+            row = f"session:{row_number}"
+            row_number += 1
+            tree.insert(
+                "",
+                "end",
+                iid=row,
+                values=(session.title, session.updated),
+                tags=("active",) if session.active else (),
+            )
+            self.session_rows[row] = session
+        tree.tag_configure("active", font=("TkDefaultFont", 9, "bold"))
+
+    def _refresh_sessions(self) -> None:
+        if self.sessions_request_active:
+            if self.sessions_status is not None:
+                self.sessions_status.set("Session request already in progress...")
+            return
+        self._start_sessions_request("list")
+
+    def _start_new_chat(self) -> None:
+        self._start_sessions_request("new")
+
+    def _open_selected_session(self) -> None:
+        tree = self.sessions_tree
+        if tree is None:
+            return
+        selection = tree.selection()
+        if not selection:
+            if self.sessions_status is not None:
+                self.sessions_status.set("Select a session to open.")
+            return
+        session = self.session_rows.get(selection[0])
+        if session is not None:
+            self._start_sessions_request("open", session.session_id)
+
+    def _start_sessions_request(self, action: str, session_id: str | None = None) -> None:
+        if self.sessions_request_active:
+            return
+        self.sessions_request_active = True
+        if self.sessions_status is not None:
+            self.sessions_status.set(
+                "Loading sessions..." if action == "list" else "Opening chat..."
+            )
+        worker = threading.Thread(
+            target=self._sessions_worker,
+            args=(action, session_id),
+            name="deepbrid-sessions",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError as error:
+            self.sessions_request_active = False
+            if self.sessions_status is not None:
+                self.sessions_status.set(f"Could not start the session request: {error}")
+
+    def _sessions_worker(self, action: str, session_id: str | None) -> None:
+        try:
+            if action == "list":
+                sessions = self.chat_browser.list_sessions()
+                self.sessions_events.put(("sessions-list-success", sessions))
+            elif action == "open" and session_id is not None:
+                self.chat_browser.open_session(session_id)
+                self.sessions_events.put(("sessions-action-success", "Opened session."))
+            elif action == "new":
+                self.chat_browser.new_chat()
+                self.sessions_events.put(("sessions-action-success", "Started a new chat."))
+            else:
+                raise ValueError(f"Unknown session action: {action}")
+        except (BrowserLaunchError, OSError, RuntimeError, ValueError) as error:
+            self.sessions_events.put(("sessions-error", str(error)))
+
+    def _poll_sessions_events(self) -> None:
+        while True:
+            try:
+                event, content = self.sessions_events.get_nowait()
+            except queue.Empty:
+                break
+            self.sessions_request_active = False
+            if event == "sessions-list-success":
+                if not isinstance(content, list) or not all(
+                    isinstance(session, ChatSession) for session in content
+                ):
+                    if self.sessions_status is not None:
+                        self.sessions_status.set("Deepbrid returned invalid session data.")
+                    continue
+                self.sessions = content
+                self._filter_sessions()
+                if self.sessions_status is not None:
+                    self.sessions_status.set(f"{len(content)} session(s) loaded.")
+            elif event == "sessions-action-success":
+                if isinstance(content, str):
+                    self.status.set(content)
+                self._close_sessions()
+            elif event == "sessions-error":
+                message = str(content)
+                if self.sessions_status is not None:
+                    self.sessions_status.set(message)
+                self.status.set(message)
 
     @staticmethod
     def _validate_output_log_path(path: str) -> None:
@@ -1203,10 +1495,17 @@ class DeepbridCodeApp:
             if item.kind == "image"
         ]
         self.pending_remove_images_after_send = self.remove_images_after_send
+        selected_model = self.model_selector.get()
+        selected_mode = self.mode_selector.get()
+        web_enabled = self.web_var.get()
+        self.ai_model = selected_model
+        self.ai_mode = selected_mode
+        self.web_enabled = web_enabled
         self.chat_request_active = True
         self._log(
             f"Sending prompt with {len(self.context_files)} context item(s) "
-            f"and {len(attachment_paths)} attachment(s)."
+            f"and {len(attachment_paths)} attachment(s), model {selected_model}, "
+            f"mode {selected_mode}, Web {'on' if web_enabled else 'off'}."
         )
         self._append_chat("You", prompt)
         if attachment_paths:
@@ -1219,7 +1518,15 @@ class DeepbridCodeApp:
         self._start_progress()
         worker = threading.Thread(
             target=self._chat_worker,
-            args=(prompt, attachment_paths, self.project_root, external_attachment_paths),
+            args=(
+                prompt,
+                attachment_paths,
+                self.project_root,
+                external_attachment_paths,
+                selected_model,
+                selected_mode,
+                web_enabled,
+            ),
             name="deepbrid-chat-ui",
             daemon=True,
         )
@@ -1237,6 +1544,9 @@ class DeepbridCodeApp:
         attachment_paths: list[Path],
         project_root: Path | None,
         external_attachment_paths: list[Path],
+        model: str,
+        mode: str,
+        web_enabled: bool,
     ) -> None:
         try:
             response = self.chat_browser.send_message(
@@ -1245,6 +1555,9 @@ class DeepbridCodeApp:
                 project_root,
                 external_attachment_paths,
                 on_submitted=lambda: self.chat_events.put(("chat-submitted", "")),
+                model=model,
+                mode=mode,
+                web_enabled=web_enabled,
             )
         except BrowserLaunchError as error:
             self._log(f"Chat request failed: {error}")
@@ -1291,6 +1604,7 @@ class DeepbridCodeApp:
             elif event == "browser-error":
                 self.status.set(content)
         self._poll_console_events()
+        self._poll_sessions_events()
         self._poll_after_id = self.root.after(200, self._poll_chat_events)
 
     def _on_root_destroy(self, event: tk.Event) -> None:

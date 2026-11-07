@@ -51,7 +51,14 @@ requests or depend on undocumented chat APIs.
 
 The app stores preferences in `%LOCALAPPDATA%\Deepbrid Code\settings.sqlite3`,
 including the automatic Chrome setting, dark theme choice, and last opened
-project folder.
+project folder. Select a model, assistant mode, and optional **Web** search
+beside the message controls; the default mode is **Code Assistant** and Web
+search is off. These choices are applied through the visible Deepbrid controls
+when sending a message.
+
+Use **Sessions** to search the sessions currently available in Deepbrid, open a
+selected chat, or start a new one. Session history is read from the signed-in
+Deepbrid page and is not copied into local storage.
 
 ## Privacy and project files
 
@@ -121,9 +128,12 @@ in-memory conversation is preceded by a timestamped separator.
 
 Use **Toggle Console** to show or hide timestamped application diagnostics and
 errors in a resizable panel at the bottom of the window. The console keeps the
-latest messages in memory while the app is running. To retain them across runs,
-set a log file path in **Settings**; file logging is enabled whenever the path
-is nonempty. Clear the path in Settings to disable file logging.
+latest messages in memory while the app is running. File diagnostics are
+disabled by default. In **Settings**, enable **Enable diagnostics file logging**
+to append diagnostics to the path shown there; the default path is
+`diagnostics\deepbrid-code.log` in the project folder. The checkbox and path
+are independent: logging is active only when enabled and the path is nonempty.
+Clearing the path disables file logging without removing the checkbox setting.
 
 The app remembers the last project folder and reopens it next time. These
 preferences, the automatic Chrome startup setting, dark theme choice, and

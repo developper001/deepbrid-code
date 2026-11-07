@@ -11,6 +11,7 @@ DARK_THEME = "dark_theme"
 LAST_PROJECT = "last_project"
 WRAP_TEXT = "wrap_text"
 OUTPUT_LOG_PATH = "output_log_path"
+DIAGNOSTICS_ENABLED = "diagnostics_enabled"
 REMOVE_IMAGES_AFTER_SEND = "remove_images_after_send"
 
 
