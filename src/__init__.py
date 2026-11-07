@@ -1,0 +1,1 @@
+"""Deepbrid Code desktop application."""
