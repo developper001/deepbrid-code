@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import tkinter as tk
 import unittest
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from src.app import DeepbridCodeApp
+from src.context import build_prompt
 from src.settings import AUTO_OPEN_CHROME, DARK_THEME, LAST_PROJECT, WRAP_TEXT, SettingsStore
 from src.settings_dialog import SettingsDialog
 
@@ -78,6 +80,9 @@ class AppStartupTests(unittest.TestCase):
                     app = DeepbridCodeApp(root)
                     self.assertTrue(app.dark_theme)
                     self.assertTrue(app.wrap_text)
+                    self.assertTrue(root.geometry().startswith("1440x900"))
+                    self.assertEqual(app.chat_output.cget("height"), 20)
+                    self.assertEqual(app.message.cget("height"), 7)
                     self.assertEqual((app.logo_image.width(), app.logo_image.height()), (48, 48))
                     self.assertEqual(
                         [icon.width() for icon in app.window_icons],
@@ -141,7 +146,7 @@ class AppStartupTests(unittest.TestCase):
 
                     app.file_context_menu.invoke(0)
                     self.assertEqual(len(app.context_files), 1)
-                    self.assertIn("main.py (text)", app.context_list.get(0))
+                    self.assertEqual(app.file_tree.item(item, "text"), "* main.py")
                     self.assertIn("Added main.py", app.status.get())
             finally:
                 root.destroy()
@@ -165,9 +170,13 @@ class AppStartupTests(unittest.TestCase):
                     app.add_context_button.invoke()
 
                     self.assertEqual(len(app.context_files), 1)
-                    self.assertEqual(app.context_list.size(), 1)
-                    self.assertIn("main.py (text)", app.context_list.get(0))
+                    self.assertEqual(app.file_tree.item("f:main.py", "text"), "* main.py")
                     self.assertIn("Added main.py", app.status.get())
+
+                    app.file_tree.selection_set("f:main.py")
+                    app.remove_context_button.invoke()
+                    self.assertEqual(len(app.context_files), 0)
+                    self.assertEqual(app.file_tree.item("f:main.py", "text"), "main.py")
             finally:
                 root.destroy()
 
@@ -216,10 +225,117 @@ class AppStartupTests(unittest.TestCase):
                     self.assertEqual(item.kind, "image")
                     self.assertTrue(item.external)
                     self.assertTrue(item.path.is_file())
-                    self.assertIn("Clipboard image 1 (image)", app.context_list.get(0))
+                    self.assertEqual(
+                        app.file_tree.item("context:image:1", "text"),
+                        "* Clipboard image 1",
+                    )
                     self.assertIn("Added clipboard-1.png", app.status.get())
                     app._cleanup_clipboard_images()
                     self.assertIsNone(app.clipboard_image_directory)
+            finally:
+                root.destroy()
+
+    def test_pasting_windows_clipboard_image_path_attaches_image_not_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            source_image = root_path / "ScreenClip" / "screen.png"
+            source_image.parent.mkdir()
+            Image.new("RGB", (4, 4), "blue").save(source_image)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                    patch("src.app.ImageGrab.grabclipboard", return_value=[str(source_image)]),
+                ):
+                    app = DeepbridCodeApp(root)
+                    result = app._paste_clipboard_image(SimpleNamespace())
+                    prompt = build_prompt(
+                        "Can you describe this image?",
+                        list(app.context_files.values()),
+                    )
+
+                    self.assertEqual(result, "break")
+                    self.assertEqual(len(app.context_files), 1)
+                    self.assertIn("[Selected image: Clipboard image 1]", prompt)
+                    self.assertNotIn(str(source_image), prompt)
+                    self.assertNotIn("ScreenClip", prompt)
+                    context_iid = app.context_tree_iids[
+                        str(next(iter(app.context_files.values())).path)
+                    ]
+                    self.assertTrue(app.file_tree.exists(context_iid))
+                    app.file_tree.selection_set(context_iid)
+                    app.remove_context_button.invoke()
+                    self.assertEqual(len(app.context_files), 0)
+                    self.assertFalse(app.file_tree.exists(context_iid))
+                    app._cleanup_clipboard_images()
+            finally:
+                root.destroy()
+
+    def test_pasting_clipboard_text_path_to_image_is_added_as_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            image_path = root_path / "screenshot.png"
+            Image.new("RGB", (4, 4), "green").save(image_path)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                    patch("src.app.ImageGrab.grabclipboard", return_value=None),
+                    patch.object(root, "clipboard_get", return_value=str(image_path)),
+                ):
+                    app = DeepbridCodeApp(root)
+                    self.assertEqual(app._paste_clipboard_image(SimpleNamespace()), "break")
+                    self.assertEqual(len(app.context_files), 1)
+                    app._cleanup_clipboard_images()
+            finally:
+                root.destroy()
+
+    def test_plain_clipboard_text_uses_normal_paste_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                    patch("src.app.ImageGrab.grabclipboard", return_value=None),
+                    patch.object(root, "clipboard_get", return_value="ordinary text"),
+                ):
+                    app = DeepbridCodeApp(root)
+                    self.assertIsNone(app._paste_clipboard_image(SimpleNamespace()))
+                    self.assertEqual(len(app.context_files), 0)
+            finally:
+                root.destroy()
+
+    def test_each_prompt_has_a_timestamped_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app._append_chat("You", "First prompt")
+                    app._append_chat("Deepbrid AI", "First response")
+                    app._append_chat("You", "Second prompt")
+                    transcript = app.chat_output.get("1.0", "end")
+
+                    self.assertEqual(
+                        len(re.findall(r"-{20} \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} -{20}", transcript)),
+                        2,
+                    )
+                    self.assertLess(
+                        transcript.index("First prompt"),
+                        transcript.index("Second prompt"),
+                    )
             finally:
                 root.destroy()
 

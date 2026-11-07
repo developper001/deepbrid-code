@@ -58,7 +58,8 @@ project folder.
 Opening a folder only lists local files; it does not upload or modify them.
 Common generated and dependency directories such as `.git`, `node_modules`,
 `build`, and `dist` are omitted. Only files you explicitly add appear in the
-context list. Avoid selecting secrets or sensitive project content. Text
+included context. A leading `*` in the project tree marks files that will be
+sent. Avoid selecting secrets or sensitive project content. Text
 context is limited to 256 KiB per file and
 1 MiB total. Image previews use the formats supported by the installed Tk
 build and are limited to 20 MiB; selected images larger than that are not
@@ -71,25 +72,30 @@ attached by the app.
    and click **Add selected to context**, or right-click a selected file and
    choose the same command. The app checks file contents rather than relying on
    the extension: text files such as `LICENSE` are included, recognized images
-   are attached as images, and binary files are refused. Added files appear in
-   **Included context** with their project-relative paths and types. Selecting
-   or previewing a file alone does not include or send it.
-3. To exclude an item, select it in **Included context** and click
-   **Remove selected context**.
+   are attached as images, and binary files are refused. Added files are marked
+   with `*` in the project tree. Selecting or previewing a file alone does not
+   include or send it.
+3. To exclude an item, select it in the tree and click
+   **Remove selected from context**.
 4. Enter your question in **Message**, then choose **Send to Deepbrid AI Chat**
    to send the message and listed context.
 
 Included context is kept locally in the app until you send a prompt.
 When sent, selected text is included with its file path and contents, and
 selected images are attached through the chat page's file-upload control.
-The context list is not cleared after sending, so you can reuse or remove items
-for later messages. Review the list before sending, especially for secrets;
+Included context is not cleared after sending, so you can reuse or remove items
+for later messages. Review marked files before sending, especially for secrets;
 see the per-file and total text limits above.
 
 You can paste a screenshot from the clipboard into the **Message** box with
-Ctrl+V. The image is added to **Included context** and attached with your next
-message; pasting does not send anything by itself. Pasted images are held in a
-temporary local folder and removed when the app closes.
+Ctrl+V. Clipboard screenshots and copied image-file paths are added to the
+**Pasted images** group in the project tree and attached with your next message;
+pasting does not send anything by itself. Pasted images are held in a temporary
+local folder and removed when the app closes.
+
+The app opens with a larger chat workspace. Each prompt in the in-memory
+conversation is preceded by a timestamped separator to make turns easier to
+distinguish.
 
 ## Preferences
 

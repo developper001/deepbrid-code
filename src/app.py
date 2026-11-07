@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -35,7 +36,8 @@ class DeepbridCodeApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Deepbrid Code")
-        self.root.geometry("1100x720")
+        self.root.geometry("1440x900")
+        self.root.minsize(1000, 700)
         self.settings = SettingsStore(SETTINGS_DATABASE)
         self.auto_open_chrome = self.settings.get_bool(AUTO_OPEN_CHROME, default=True)
         self.dark_theme = self.settings.get_bool(DARK_THEME, default=False)
@@ -45,6 +47,10 @@ class DeepbridCodeApp:
         self.tree_paths: dict[str, Path] = {}
         self.context_files: dict[str, ContextFile] = {}
         self.context_order: list[str] = []
+        self.context_tree_iids: dict[str, str] = {}
+        self.external_context_tree_items: dict[str, ContextFile] = {}
+        self.pasted_context_group: str | None = None
+        self.next_external_tree_id = 1
         self.preview_image: tk.PhotoImage | None = None
         self.window_icons: tuple[tk.PhotoImage, ...] = ()
         self.clipboard_image_directory: tempfile.TemporaryDirectory[str] | None = None
@@ -83,15 +89,22 @@ class DeepbridCodeApp:
         main.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         files_panel = ttk.Frame(main, padding=4)
-        preview_panel = ttk.Frame(main, padding=4)
-        context_panel = ttk.Frame(main, padding=4)
+        chat_panel = ttk.Frame(main, padding=4)
         main.add(files_panel, weight=1)
-        main.add(preview_panel, weight=2)
-        main.add(context_panel, weight=2)
+        main.add(chat_panel, weight=4)
 
-        ttk.Label(files_panel, text="Project files").pack(anchor="w", pady=(0, 4))
-        self.file_tree = ttk.Treeview(files_panel, show="tree", selectmode="extended")
-        self.file_tree.pack(fill="both", expand=True)
+        files_panel.rowconfigure(1, weight=3)
+        files_panel.columnconfigure(0, weight=1)
+        ttk.Label(
+            files_panel,
+            text="Project files (* = included in context)",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.file_tree = ttk.Treeview(
+            files_panel,
+            show="tree",
+            selectmode="extended",
+        )
+        self.file_tree.grid(row=1, column=0, sticky="nsew")
         self.file_tree.bind("<<TreeviewSelect>>", self._preview_selection)
         self.file_tree.bind("<Button-3>", self._show_file_context_menu)
         self.file_context_menu = tk.Menu(self.root, tearoff=False)
@@ -99,18 +112,34 @@ class DeepbridCodeApp:
             label="Add selected to context",
             command=self._add_context,
         )
+        self.file_context_menu.add_command(
+            label="Remove selected from context",
+            command=self._remove_selected_context,
+        )
         self.add_context_button = ttk.Button(
             files_panel,
             text="Add selected to context",
             command=self._add_context,
         )
-        self.add_context_button.pack(
-            fill="x", pady=(6, 0)
+        self.add_context_button.grid(
+            row=2, column=0, sticky="ew", pady=(6, 2)
         )
+        self.remove_context_button = ttk.Button(
+            files_panel,
+            text="Remove selected from context",
+            command=self._remove_selected_context,
+        )
+        self.remove_context_button.grid(row=3, column=0, sticky="ew", pady=(0, 8))
 
-        ttk.Label(preview_panel, text="Preview").pack(anchor="w", pady=(0, 4))
-        preview_frame = ttk.Frame(preview_panel)
-        preview_frame.pack(fill="both", expand=True)
+        ttk.Label(files_panel, text="Preview").grid(
+            row=4,
+            column=0,
+            sticky="w",
+            pady=(0, 4),
+        )
+        preview_frame = ttk.Frame(files_panel)
+        preview_frame.grid(row=5, column=0, sticky="nsew")
+        files_panel.rowconfigure(5, weight=2)
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
         self.preview = tk.Text(
@@ -133,29 +162,20 @@ class DeepbridCodeApp:
         self.preview.grid(row=0, column=0, sticky="nsew")
         self.preview_yscroll.grid(row=0, column=1, sticky="ns")
         self.preview_xscroll.grid(row=1, column=0, sticky="ew")
-        self.preview_image_label = ttk.Label(preview_panel)
-        self.preview_image_label.pack(fill="x")
+        self.preview_image_label = ttk.Label(files_panel)
+        self.preview_image_label.grid(row=6, column=0, sticky="ew")
 
-        ttk.Label(context_panel, text="Included context (nothing is sent automatically)").pack(
-            anchor="w", pady=(0, 4)
-        )
-        self.context_list = tk.Listbox(context_panel, height=8, selectmode="extended")
-        self.context_list.pack(fill="x")
-        ttk.Button(context_panel, text="Remove selected context", command=self._remove_context).pack(
-            fill="x", pady=(4, 8)
-        )
-
-        ttk.Label(context_panel, text="Conversation (kept in memory only)").pack(anchor="w")
-        self.chat_output = tk.Text(context_panel, height=10, wrap="word", state="disabled")
+        ttk.Label(chat_panel, text="Conversation (kept in memory only)").pack(anchor="w")
+        self.chat_output = tk.Text(chat_panel, height=20, wrap="word", state="disabled")
         self.chat_output.pack(fill="both", expand=True, pady=(4, 8))
 
-        ttk.Label(context_panel, text="Message").pack(anchor="w")
-        self.message = tk.Text(context_panel, height=5, wrap="word")
-        self.message.pack(fill="both", expand=True, pady=(4, 6))
+        ttk.Label(chat_panel, text="Message").pack(anchor="w")
+        self.message = tk.Text(chat_panel, height=7, wrap="word")
+        self.message.pack(fill="x", pady=(4, 6))
         self.message.bind("<Control-v>", self._paste_clipboard_image)
         self.message.bind("<Control-V>", self._paste_clipboard_image)
         self.message.bind("<Shift-Insert>", self._paste_clipboard_image)
-        actions = ttk.Frame(context_panel)
+        actions = ttk.Frame(chat_panel)
         actions.pack(fill="x")
         ttk.Button(actions, text="Send to Deepbrid AI Chat", command=self._send).pack(
             fill="x", pady=(4, 0)
@@ -189,7 +209,9 @@ class DeepbridCodeApp:
         self.project_root = root
         self.context_files.clear()
         self.context_order.clear()
-        self.context_list.delete(0, "end")
+        self.context_tree_iids.clear()
+        self.external_context_tree_items.clear()
+        self.pasted_context_group = None
         children = self.file_tree.get_children()
         if children:
             self.file_tree.delete(*children)
@@ -366,11 +388,12 @@ class DeepbridCodeApp:
             insertbackground=colors["foreground"],
             selectbackground=colors["selection"],
         )
-        self.context_list.configure(
-            background=colors["field"],
-            foreground=colors["foreground"],
-            selectbackground=colors["selection"],
-            selectforeground=colors["foreground"],
+        self.chat_output.tag_configure(
+            "turn-separator",
+            foreground=colors["accent"],
+            justify="center",
+            spacing1=8,
+            spacing3=8,
         )
         self.file_context_menu.configure(
             background=colors["surface"],
@@ -467,6 +490,9 @@ class DeepbridCodeApp:
         skipped: list[str] = []
         errors: list[str] = []
         for iid in selected_items:
+            if iid in self.external_context_tree_items:
+                skipped.append(self.external_context_tree_items[iid].label or "Clipboard image")
+                continue
             path = self.tree_paths.get(iid)
             if path is None:
                 skipped.append(f"{self.file_tree.item(iid, 'text')} (folder)")
@@ -505,17 +531,8 @@ class DeepbridCodeApp:
                 continue
             self.context_files[key] = item
             self.context_order.append(key)
-            self.context_list.insert(
-                "end",
-                f"{item.label or item.path.name} ({item.kind})",
-            )
+            self._mark_context_in_tree(key, item)
             added.append(item.path.name)
-        if added:
-            last_added = len(self.context_order) - 1
-            self.context_list.selection_clear(0, "end")
-            self.context_list.selection_set(last_added)
-            self.context_list.see(last_added)
-            self.context_list.update_idletasks()
         messages: list[str] = []
         if added:
             messages.append(
@@ -535,33 +552,124 @@ class DeepbridCodeApp:
             )
         self.status.set(" ".join(messages))
 
+    def _mark_context_in_tree(self, key: str, item: ContextFile) -> None:
+        if item.external:
+            if self.pasted_context_group is None:
+                self.pasted_context_group = "context:pasted"
+                self.file_tree.insert(
+                    "",
+                    "end",
+                    iid=self.pasted_context_group,
+                    text="Pasted images",
+                    open=True,
+                )
+            iid = f"context:image:{self.next_external_tree_id}"
+            self.next_external_tree_id += 1
+            label = item.label or item.path.name
+            self.file_tree.insert(
+                self.pasted_context_group,
+                "end",
+                iid=iid,
+                text=f"* {label}",
+            )
+            self.tree_paths[iid] = item.path
+            self.external_context_tree_items[iid] = item
+        else:
+            iid = next(
+                (
+                    tree_iid
+                    for tree_iid, path in self.tree_paths.items()
+                    if path == item.path
+                ),
+                None,
+            )
+            if iid is not None:
+                self.file_tree.item(
+                    iid,
+                    text=f"* {item.path.name}",
+                )
+        if iid is not None:
+            self.context_tree_iids[key] = iid
+
     def _paste_clipboard_image(self, _event: tk.Event) -> str | None:
         try:
             clipboard_content = ImageGrab.grabclipboard()
         except OSError as error:
             self.status.set(f"Could not read the clipboard image: {error}")
-            return None
-        if not isinstance(clipboard_content, Image.Image):
+            clipboard_content = None
+
+        source_image: Image.Image | None = None
+        if isinstance(clipboard_content, Image.Image):
+            source_image = clipboard_content
+        else:
+            image_path = self._clipboard_image_path(clipboard_content)
+            if image_path is None:
+                image_path = self._clipboard_text_image_path()
+            if image_path is None:
+                return None
+            try:
+                with Image.open(image_path) as image:
+                    source_image = image.convert("RGBA")
+            except (OSError, ValueError) as error:
+                self.status.set(f"Could not read clipboard image {image_path.name}: {error}")
+                return "break"
+
+        if source_image is None:
             return None
         try:
-            if self.clipboard_image_directory is None:
-                self.clipboard_image_directory = tempfile.TemporaryDirectory(
-                    prefix="deepbrid-code-clipboard-"
-                )
-            image_path = (
-                Path(self.clipboard_image_directory.name)
-                / f"clipboard-{len(self.clipboard_images) + 1}.png"
-            )
-            clipboard_content.convert("RGBA").save(image_path, format="PNG")
-            if image_path.stat().st_size > MAX_IMAGE_PREVIEW_BYTES:
-                image_path.unlink()
-                self.status.set(
-                    f"Clipboard image exceeds the {MAX_IMAGE_PREVIEW_BYTES // (1024 * 1024)} MiB limit."
-                )
-                return "break"
+            self._save_clipboard_image(source_image)
         except (OSError, ValueError) as error:
             self.status.set(f"Could not save clipboard image: {error}")
             return "break"
+        return "break"
+
+    @staticmethod
+    def _clipboard_image_path(content: object) -> Path | None:
+        if not isinstance(content, (list, tuple)):
+            return None
+        for value in content:
+            if not isinstance(value, str):
+                continue
+            path = Path(value)
+            try:
+                if path.is_file() and context_kind(path) == "image":
+                    return path
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def _clipboard_text_image_path(self) -> Path | None:
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            return None
+        candidate = text.strip().strip('"')
+        if not candidate:
+            return None
+        path = Path(candidate)
+        try:
+            if path.is_file() and context_kind(path) == "image":
+                return path
+        except (OSError, ValueError):
+            return None
+        return None
+
+    def _save_clipboard_image(self, image: Image.Image) -> None:
+        if self.clipboard_image_directory is None:
+            self.clipboard_image_directory = tempfile.TemporaryDirectory(
+                prefix="deepbrid-code-clipboard-"
+            )
+        image_path = (
+            Path(self.clipboard_image_directory.name)
+            / f"clipboard-{len(self.clipboard_images) + 1}.png"
+        )
+        image.convert("RGBA").save(image_path, format="PNG")
+        if image_path.stat().st_size > MAX_IMAGE_PREVIEW_BYTES:
+            image_path.unlink()
+            self.status.set(
+                f"Clipboard image exceeds the {MAX_IMAGE_PREVIEW_BYTES // (1024 * 1024)} MiB limit."
+            )
+            return
 
         self.clipboard_images.add(image_path)
         self._include_context(
@@ -574,15 +682,41 @@ class DeepbridCodeApp:
                 )
             ]
         )
-        return "break"
 
-    def _remove_context(self) -> None:
-        selected = list(self.context_list.curselection())
-        for index in reversed(selected):
-            key = self.context_order.pop(index)
+    def _remove_selected_context(self) -> None:
+        selected = self.file_tree.selection()
+        removed = 0
+        for iid in selected:
+            key = next(
+                (
+                    context_key
+                    for context_key, tree_iid in self.context_tree_iids.items()
+                    if tree_iid == iid
+                ),
+                None,
+            )
+            if key is None:
+                continue
+            item = self.context_files[key]
+            self.context_tree_iids.pop(key, None)
             self.context_files.pop(key, None)
-            self.context_list.delete(index)
-        self.status.set(f"{len(self.context_files)} context item(s) included.")
+            self.context_order.remove(key)
+            if item.external:
+                self.tree_paths.pop(iid, None)
+                self.external_context_tree_items.pop(iid, None)
+                self.file_tree.delete(iid)
+            else:
+                self.file_tree.item(iid, text=item.path.name)
+            removed += 1
+        if self.pasted_context_group and not self.file_tree.get_children(
+            self.pasted_context_group
+        ):
+            self.file_tree.delete(self.pasted_context_group)
+            self.pasted_context_group = None
+        self.status.set(
+            f"Removed {removed} context item(s). "
+            f"{len(self.context_files)} item(s) remain included."
+        )
 
     def _send(self) -> None:
         if self.chat_request_active:
@@ -684,6 +818,13 @@ class DeepbridCodeApp:
 
     def _append_chat(self, speaker: str, content: str) -> None:
         self.chat_output.configure(state="normal")
+        if speaker == "You":
+            timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            self.chat_output.insert(
+                "end",
+                f"-------------------- {timestamp} --------------------\n",
+                "turn-separator",
+            )
         self.chat_output.insert("end", f"{speaker}:\n{content}\n\n")
         self.chat_output.see("end")
         self.chat_output.configure(state="disabled")
