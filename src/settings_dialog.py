@@ -5,7 +5,12 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from typing import Callable, Protocol
 
-from .settings import AUTO_OPEN_CHROME, DARK_THEME, WRAP_TEXT
+from .settings import (
+    AUTO_OPEN_CHROME,
+    DARK_THEME,
+    REMOVE_IMAGES_AFTER_SEND,
+    WRAP_TEXT,
+)
 
 
 class SettingsBackend(Protocol):
@@ -23,6 +28,8 @@ class SettingsDialog:
         on_dark_theme_changed: Callable[[bool], None],
         wrap_text: bool,
         on_wrap_text_changed: Callable[[bool], None],
+        remove_images_after_send: bool,
+        on_remove_images_after_send_changed: Callable[[bool], None],
         output_log_path: str,
         on_output_logging_changed: Callable[[str], None],
     ) -> None:
@@ -30,11 +37,12 @@ class SettingsDialog:
         self.on_auto_open_changed = on_auto_open_changed
         self.on_dark_theme_changed = on_dark_theme_changed
         self.on_wrap_text_changed = on_wrap_text_changed
+        self.on_remove_images_after_send_changed = on_remove_images_after_send_changed
         self.on_output_logging_changed = on_output_logging_changed
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Settings")
-        self.dialog.geometry("640x480")
-        self.dialog.minsize(560, 420)
+        self.dialog.geometry("640x520")
+        self.dialog.minsize(560, 460)
         self.dialog.transient(parent)
 
         frame = ttk.Frame(self.dialog, padding=16)
@@ -112,9 +120,19 @@ class SettingsDialog:
             variable=self.wrap_text,
             command=self._save_wrap_text,
         ).grid(row=6, column=0, sticky="w", pady=(6, 0))
-        ttk.Separator(content).grid(row=7, column=0, sticky="ew", pady=(14, 10))
+        self.remove_images_after_send = tk.BooleanVar(
+            master=self.dialog,
+            value=remove_images_after_send,
+        )
+        ttk.Checkbutton(
+            content,
+            text="Remove images from context after sending",
+            variable=self.remove_images_after_send,
+            command=self._save_remove_images_after_send,
+        ).grid(row=7, column=0, sticky="w", pady=(6, 0))
+        ttk.Separator(content).grid(row=8, column=0, sticky="ew", pady=(14, 10))
         ttk.Label(content, text="Diagnostics", font=("TkDefaultFont", 12, "bold")).grid(
-            row=8,
+            row=9,
             column=0,
             sticky="w",
             pady=(0, 6),
@@ -130,12 +148,12 @@ class SettingsDialog:
             else "File logging is disabled."
         )
         ttk.Label(content, text="Log file path (empty disables file logging)").grid(
-            row=9,
+            row=10,
             column=0,
             sticky="w",
         )
         log_path_controls = ttk.Frame(content)
-        log_path_controls.grid(row=10, column=0, sticky="ew", pady=(6, 0))
+        log_path_controls.grid(row=11, column=0, sticky="ew", pady=(6, 0))
         log_path_controls.columnconfigure(0, weight=1)
         ttk.Entry(
             log_path_controls,
@@ -157,13 +175,13 @@ class SettingsDialog:
             command=self._clear_output_log_path,
         ).grid(row=0, column=3, padx=(8, 0))
         ttk.Label(content, textvariable=self.output_log_status).grid(
-            row=11,
+            row=12,
             column=0,
             sticky="w",
             pady=(4, 0),
         )
         ttk.Label(content, textvariable=self.status).grid(
-            row=12,
+            row=13,
             column=0,
             sticky="w",
             pady=(8, 0),
@@ -178,6 +196,7 @@ class SettingsDialog:
         self.saved_enabled = auto_open_chrome
         self.saved_dark_theme = dark_theme
         self.saved_wrap_text = wrap_text
+        self.saved_remove_images_after_send = remove_images_after_send
         self.saved_output_log_path = output_log_path
 
     def _save(self) -> None:
@@ -217,6 +236,18 @@ class SettingsDialog:
             return
         self.saved_wrap_text = enabled
         self.on_wrap_text_changed(enabled)
+        self.status.set("Saved.")
+
+    def _save_remove_images_after_send(self) -> None:
+        enabled = self.remove_images_after_send.get()
+        try:
+            self.settings.set_bool(REMOVE_IMAGES_AFTER_SEND, enabled)
+        except (OSError, sqlite3.Error) as error:
+            self.remove_images_after_send.set(self.saved_remove_images_after_send)
+            self.status.set(f"Could not save setting: {error}")
+            return
+        self.saved_remove_images_after_send = enabled
+        self.on_remove_images_after_send_changed(enabled)
         self.status.set("Saved.")
 
     def _save_output_logging(self) -> None:

@@ -12,8 +12,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 import websocket
+
+from .context import UPLOAD_IMAGE_EXTENSIONS, context_kind
 
 
 AI_CHAT_URL = "https://www.deepbrid.com/ai-chat"
@@ -147,9 +150,10 @@ class DeepbridChatBrowser:
     def send_message(
         self,
         prompt: str,
-        image_paths: list[Path] | None = None,
+        attachment_paths: list[Path] | None = None,
         project_root: Path | None = None,
-        external_image_paths: list[Path] | None = None,
+        external_attachment_paths: list[Path] | None = None,
+        on_submitted: Callable[[], None] | None = None,
     ) -> str:
         if not prompt.strip():
             raise BrowserLaunchError("The prompt is empty; nothing was sent.")
@@ -166,20 +170,25 @@ class DeepbridChatBrowser:
                 if isinstance(error, str)
                 else "Sign in to Deepbrid AI Chat in the dedicated Chrome window, then retry."
             )
-        images = image_paths or []
+        attachments = attachment_paths or []
         try:
-            external_images = {
-                path.resolve(strict=True) for path in (external_image_paths or [])
+            external_attachments = {
+                path.resolve(strict=True) for path in (external_attachment_paths or [])
             }
         except (OSError, RuntimeError) as error:
-            raise BrowserLaunchError(f"Could not access a pasted image: {error}") from error
-        if images and project_root is None and any(
-            path.resolve(strict=True) not in external_images for path in images
+            raise BrowserLaunchError(f"Could not access an additional file: {error}") from error
+        if attachments and project_root is None and any(
+            path.resolve(strict=True) not in external_attachments for path in attachments
         ):
             raise BrowserLaunchError(
-                "Open a project folder before attaching selected images to Deepbrid AI Chat."
+                "Open a project folder before attaching project files to Deepbrid AI Chat."
             )
-        self._attach_images(websocket_url, images, project_root, external_images)
+        self._attach_files(
+            websocket_url,
+            attachments,
+            project_root,
+            external_attachments,
+        )
         state = self._evaluate(websocket_url, self._submit_script(prompt))
         if not isinstance(state, dict) or state.get("sent") is not True:
             error = state.get("error") if isinstance(state, dict) else None
@@ -190,6 +199,8 @@ class DeepbridChatBrowser:
         if not isinstance(assistant_count, int):
             raise BrowserLaunchError("Deepbrid AI Chat did not confirm the submitted message.")
         self._wait_for_submission(websocket_url, assistant_count)
+        if on_submitted is not None:
+            on_submitted()
 
         deadline = time.monotonic() + RESPONSE_TIMEOUT
         while time.monotonic() < deadline:
@@ -329,22 +340,22 @@ class DeepbridChatBrowser:
             time.sleep(0.2)
         return None
 
-    def _attach_images(
+    def _attach_files(
         self,
         websocket_url: str,
-        image_paths: list[Path],
+        attachment_paths: list[Path],
         project_root: Path | None,
-        external_image_paths: set[Path] | None = None,
+        external_attachment_paths: set[Path] | None = None,
     ) -> None:
-        if not image_paths:
+        if not attachment_paths:
             return
-        allowed_external_paths = external_image_paths or set()
+        allowed_external_paths = external_attachment_paths or set()
         resolved_paths: list[Path] = []
-        for path in image_paths:
+        for path in attachment_paths:
             try:
                 if path.is_symlink() or not path.is_file():
                     raise BrowserLaunchError(
-                        f"Selected image is no longer a regular file: {path.name}"
+                        f"Selected file is no longer a regular file: {path.name}"
                     )
                 size = path.stat().st_size
                 resolved_path = path.resolve(strict=True)
@@ -356,17 +367,26 @@ class DeepbridChatBrowser:
                             raise
                 elif resolved_path not in allowed_external_paths:
                     raise ValueError(
-                        f"Selected image {path.name} is outside the opened project folder."
+                        f"Selected file {path.name} is outside the opened project folder."
                     )
             except (OSError, RuntimeError) as error:
                 raise BrowserLaunchError(
-                    f"Could not access selected image {path.name}: {error}"
+                    f"Could not access selected file {path.name}: {error}"
                 ) from error
             except ValueError as error:
                 raise BrowserLaunchError(
-                    f"Selected image {path.name} is outside the opened project folder."
+                    f"Selected file {path.name} is outside the opened project folder."
                 ) from error
-            if size > MAX_IMAGE_ATTACHMENT_BYTES:
+            try:
+                is_image = (
+                    path.suffix.lower() in UPLOAD_IMAGE_EXTENSIONS
+                    or context_kind(resolved_path) == "image"
+                )
+            except (OSError, ValueError) as error:
+                raise BrowserLaunchError(
+                    f"Could not inspect selected file {path.name}: {error}"
+                ) from error
+            if is_image and size > MAX_IMAGE_ATTACHMENT_BYTES:
                 raise BrowserLaunchError(
                     f"{path.name} exceeds the {MAX_IMAGE_ATTACHMENT_BYTES // (1024 * 1024)} MiB image limit."
                 )
@@ -399,7 +419,7 @@ class DeepbridChatBrowser:
             root_id = root.get("nodeId") if isinstance(root, dict) else None
             if not isinstance(root_id, int):
                 raise BrowserLaunchError(
-                    "Could not access the Deepbrid AI Chat attachment control."
+                    "Could not access the Deepbrid AI Chat file attachment control."
                 )
             query = self._send_command_on_connection(
                 connection,
@@ -410,8 +430,8 @@ class DeepbridChatBrowser:
             node_id = query.get("nodeId")
             if not isinstance(node_id, int) or node_id == 0:
                 raise BrowserLaunchError(
-                    "Deepbrid AI Chat no longer exposes its image attachment control. "
-                    "Attach images manually in Chrome."
+                    "Deepbrid AI Chat no longer exposes its file attachment control. "
+                    "Attach files manually in Chrome."
                 )
             self._send_command_on_connection(
                 connection,
@@ -424,9 +444,9 @@ class DeepbridChatBrowser:
             )
         finally:
             self._close_devtools_connection(connection)
-        self._wait_for_image_attachments(websocket_url, expected_names)
+        self._wait_for_attachments(websocket_url, expected_names)
 
-    def _wait_for_image_attachments(
+    def _wait_for_attachments(
         self,
         websocket_url: str,
         expected_names: Counter[str],
@@ -436,7 +456,7 @@ class DeepbridChatBrowser:
         while time.monotonic() < deadline:
             state = self._evaluate(websocket_url, self._attachment_state_script())
             if not isinstance(state, dict):
-                raise BrowserLaunchError("Could not confirm the image attachment state.")
+                raise BrowserLaunchError("Could not confirm the file attachment state.")
             failed = state.get("failedNames")
             if isinstance(failed, list) and failed:
                 raise BrowserLaunchError(
@@ -456,8 +476,8 @@ class DeepbridChatBrowser:
                 return
             time.sleep(0.2)
         raise BrowserLaunchError(
-            "Deepbrid AI Chat is still processing the image attachment. Wait for its "
-            "thumbnail to finish loading, then retry."
+            "Deepbrid AI Chat is still processing the attachments. Wait for their "
+            "status to finish updating, then retry."
         )
 
     @staticmethod

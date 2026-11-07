@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -25,6 +26,139 @@ IGNORED_DIRECTORIES = {
 TEXT_PROBE_BYTES = 8192
 MAX_CONTEXT_FILE_BYTES = 256 * 1024
 MAX_CONTEXT_TOTAL_BYTES = 1024 * 1024
+UPLOAD_FILE_EXTENSIONS = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".xlsx",
+        ".pptx",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".txt",
+        ".text",
+        ".md",
+        ".markdown",
+        ".csv",
+        ".tsv",
+        ".json",
+        ".jsonl",
+        ".xml",
+        ".html",
+        ".htm",
+        ".log",
+        ".yaml",
+        ".yml",
+        ".ini",
+        ".conf",
+        ".cfg",
+        ".toml",
+        ".env",
+        ".sql",
+        ".php",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".py",
+        ".rb",
+        ".go",
+        ".rs",
+        ".java",
+        ".kt",
+        ".kts",
+        ".swift",
+        ".c",
+        ".h",
+        ".cpp",
+        ".cc",
+        ".cxx",
+        ".hpp",
+        ".cs",
+        ".m",
+        ".scala",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".ps1",
+        ".bat",
+        ".cmd",
+        ".r",
+        ".lua",
+        ".pl",
+        ".dart",
+        ".vue",
+        ".svelte",
+        ".css",
+        ".scss",
+        ".sass",
+        ".less",
+        ".tex",
+        ".srt",
+        ".vtt",
+        ".gradle",
+        ".graphql",
+        ".proto",
+    }
+)
+UPLOAD_IMAGE_EXTENSIONS = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".jfif",
+        ".pjpeg",
+        ".pjp",
+        ".jpe",
+        ".gif",
+        ".apng",
+        ".webp",
+        ".bmp",
+        ".dib",
+        ".tif",
+        ".tiff",
+        ".ico",
+        ".svg",
+        ".avif",
+        ".heic",
+        ".heif",
+        ".emf",
+        ".wmf",
+        ".jxl",
+        ".jp2",
+        ".j2k",
+        ".jpf",
+        ".jpx",
+        ".jpm",
+        ".mj2",
+        ".psd",
+        ".dng",
+        ".cr2",
+        ".nef",
+        ".arw",
+        ".orf",
+        ".rw2",
+    }
+)
+
+
+def upload_context_kind(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix in UPLOAD_IMAGE_EXTENSIONS:
+        return "image"
+    if suffix in UPLOAD_FILE_EXTENSIONS:
+        return "file"
+    media_type, _encoding = mimetypes.guess_type(path.name)
+    if media_type is not None and media_type.startswith("image/"):
+        return "image"
+    detected_kind = context_kind(path)
+    if detected_kind == "image":
+        return "image"
+    if detected_kind == "text":
+        return "text"
+    return None
 
 
 @dataclass(frozen=True)
@@ -33,6 +167,7 @@ class ContextFile:
     kind: str
     external: bool = False
     label: str | None = None
+    show_thumbnail: bool = True
 
 
 def context_kind(path: Path) -> str | None:
@@ -43,6 +178,20 @@ def context_kind(path: Path) -> str | None:
     if prefix.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")):
         return "image"
     if prefix.startswith(b"RIFF") and prefix[8:12] == b"WEBP":
+        return "image"
+    if prefix.startswith(b"BM") or prefix.startswith((b"II*\0", b"MM\0*")):
+        return "image"
+    if prefix.startswith(b"\0\0\x01\0"):
+        return "image"
+    if prefix[4:8] == b"ftyp" and prefix[8:12] in {
+        b"avif",
+        b"avis",
+        b"heic",
+        b"heix",
+        b"hevc",
+        b"mif1",
+        b"msf1",
+    }:
         return "image"
     if _is_text(prefix):
         return "text"
@@ -129,6 +278,9 @@ def build_prompt(
         )
         if item.kind == "image":
             sections.append(f"[Selected image: {relative}]")
+            continue
+        if item.kind == "file":
+            sections.append(f"[Selected file: {relative}]")
             continue
         text = read_text_context(item.path)
         total_bytes += len(text.encode("utf-8"))

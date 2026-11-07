@@ -33,11 +33,11 @@ login page is opened. By default, the profile is started automatically when the
 app opens; change this in **Settings**.
 The app does not read, copy, or transmit browser cookies, passwords, or session
 tokens. The app can control that dedicated browser profile while it is running;
-the debugging port listens only on `127.0.0.1`. **Send to Deepbrid AI Chat**
-immediately submits the message and explicitly selected context through the
-visible chat UI; selected images are attached through the site's file-upload
-control. The app shows a busy indicator while waiting and displays either the
-rendered response or an error/timeout in the conversation and status bar.
+the debugging port listens only on `127.0.0.1`. **Send** immediately submits the
+message and explicitly selected context through the visible chat UI. Supported
+documents and images are attached through the site's file-upload control. The
+app shows a busy indicator while waiting and displays either the rendered
+response or an error/timeout in the conversation and status bar.
 If Chrome is installed in a non-standard location, set
 `DEEPBRID_CHROME_PATH` to its executable before launching the app.
 The progress bar is shown only while Chrome is opening or a chat request is in
@@ -68,13 +68,12 @@ attached by the app.
 ## Using included context
 
 1. Open a project folder. Select a file in **Project files** to preview it.
-2. Right-click a file and choose **Add selected to context**. The app checks
-   file contents rather than relying on the extension: text files such as
-   `LICENSE` are included, recognized images are attached as images, and binary
-   files are refused. Right-click a directory or selected files and folders
-   and choose **Add selected to context** to include eligible selected files
-   and recursively found text files; non-text files are checked and ignored.
-   Added files are marked
+2. Right-click a file and choose **Add selected to context**. The app attaches
+   files with extensions supported by Deepbrid, including images; for other
+   extensions it checks contents, includes text files such as `LICENSE`, and
+   refuses unrecognized binary files. Right-click a directory or selected
+   files and folders and choose **Add selected to context** to include all
+   supported files and eligible text files recursively. Added files are marked
    with `*` in the project tree. Selecting or previewing a file alone does not
    include or send it.
 3. Right-click a marked file or selected folder(s) and choose
@@ -85,18 +84,34 @@ attached by the app.
    send the message and listed context. Use Ctrl+Enter to insert a newline.
 
 Included context is kept locally in the app until you send a prompt.
-When sent, selected text is included with its file path and contents, and
-selected images are attached through the chat page's file-upload control.
-Included context is not cleared after sending, so you can reuse or remove items
-for later messages. Review marked files before sending, especially for secrets;
-see the per-file and total text limits above.
+Files with extensions accepted by the site are attached directly; other files
+are checked by their contents and recognized text is included with its path and
+contents. The site currently accepts PDF, DOCX, XLSX, PPTX, ODT, ODS, ODP,
+TXT, TEXT, MD, MARKDOWN, CSV, TSV, JSON, JSONL, XML, HTML, HTM, LOG, YAML, YML,
+INI, CONF, CFG, TOML, ENV, SQL, PHP, JS, MJS, CJS, TS, TSX, JSX, PY, RB, GO,
+RS, JAVA, KT, KTS, SWIFT, C, H, CPP, CC, CXX, HPP, CS, M, SCALA, SH, BASH,
+ZSH, PS1, BAT, CMD, R, LUA, PL, DART, VUE, SVELTE, CSS, SCSS, SASS, LESS,
+TEX, SRT, VTT, GRADLE, GRAPHQL, PROTO, and images (`image/*`).
+
+Use **Add files...** to choose supported files from outside the project. These
+appear in **Additional files** with their paths (trimmed from the beginning to
+keep each filename visible); no preview is shown for files added this way.
+Images and manually added files are sent as attachments. Project files keep
+the `*` marker in the tree.
+
+By default, images are removed from included context after Deepbrid confirms
+the message was submitted; change **Remove images from context after sending**
+in **Settings** to retain them. Other context remains available for reuse.
+Review marked files before sending, especially for secrets. Text included
+inline has a 256 KiB per-file limit and 1 MiB total limit. Image attachments
+have a 20 MiB limit; non-image attachment size limits are enforced by Deepbrid.
 
 You can paste a screenshot from the clipboard into the **Message** box with
-Ctrl+V. Clipboard screenshots and copied image-file paths appear as thumbnails
-in the **Pasted images** section below the project tree, and are attached with
-your next message; right-click an image to remove it. Pasting does not send
-anything by itself. Pasted images are held in a temporary local folder and
-removed when the app closes.
+Ctrl+V. Clipboard screenshots and manually added images appear in the
+**Additional files** section below the project tree. Pasted images appear as
+thumbnails; manually added files show a shortened path. Right-click an item to
+remove it. Pasting does not send anything by itself. Pasted images are held in
+a temporary local folder and removed when the app closes.
 
 The app opens at 1180x760, with the project files pane using about one quarter
 of the window width and most space reserved for chat. Each prompt in the
@@ -110,9 +125,9 @@ latest messages in memory while the app is running. To retain them across runs,
 set a log file path in **Settings**; file logging is enabled whenever the path
 is nonempty. Clear the path in Settings to disable file logging.
 
-The app remembers the last project folder and reopens it next time. Both
-preferences, the automatic Chrome startup setting, and the dark theme choice
-are stored in SQLite at
+The app remembers the last project folder and reopens it next time. These
+preferences, the automatic Chrome startup setting, dark theme choice, and
+image-removal preference are stored in SQLite at
 `%LOCALAPPDATA%\Deepbrid Code\settings.sqlite3`. Automatic Chrome startup is
 enabled by default and can be changed in **Settings**. Toggle **Use dark mode**
 there to switch and save the app's appearance.

@@ -36,8 +36,8 @@ class FakeWebSocket:
         self.closed = True
 
 
-class BrowserImageUploadTests(unittest.TestCase):
-    def test_image_upload_uses_one_connection_for_dom_node_ids(self) -> None:
+class BrowserFileUploadTests(unittest.TestCase):
+    def test_file_upload_uses_one_connection_for_dom_node_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project = Path(temporary_directory)
             image = project / "screenshot.png"
@@ -59,7 +59,7 @@ class BrowserImageUploadTests(unittest.TestCase):
                     ],
                 ) as evaluate,
             ):
-                browser._attach_images(
+                browser._attach_files(
                     "ws://127.0.0.1:9222/devtools/page/test",
                     [image],
                     project,
@@ -102,11 +102,45 @@ class BrowserImageUploadTests(unittest.TestCase):
                 },
             ],
         ) as evaluate:
-            browser._wait_for_image_attachments(
+            browser._wait_for_attachments(
                 "ws://127.0.0.1:9222/devtools/page/test",
                 Counter({"existing.png": 1, "new.png": 1}),
             )
         self.assertEqual(evaluate.call_count, 2)
+
+    def test_submitted_callback_runs_after_site_accepts_the_message(self) -> None:
+        browser = DeepbridChatBrowser(Path("profile"))
+        sequence: list[str] = []
+        with (
+            patch.object(browser, "_wait_for_debug_port", return_value=9222),
+            patch.object(
+                browser,
+                "_find_chat_target",
+                return_value={"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/test"},
+            ),
+            patch.object(browser, "_attach_files"),
+            patch.object(
+                browser,
+                "_evaluate",
+                side_effect=[
+                    {"ready": True},
+                    {"sent": True, "assistantCount": 1},
+                    {"assistantCount": 2, "busy": False, "response": "Done"},
+                ],
+            ),
+            patch.object(
+                browser,
+                "_wait_for_submission",
+                side_effect=lambda *_args: sequence.append("accepted"),
+            ),
+        ):
+            response = browser.send_message(
+                "Describe the attachment",
+                on_submitted=lambda: sequence.append("submitted"),
+            )
+
+        self.assertEqual(response, "Done")
+        self.assertEqual(sequence, ["accepted", "submitted"])
 
     def test_submission_wait_reports_if_prompt_was_not_accepted(self) -> None:
         browser = DeepbridChatBrowser(Path("profile"))

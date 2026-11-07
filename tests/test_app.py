@@ -17,6 +17,7 @@ from src.settings import (
     DARK_THEME,
     LAST_PROJECT,
     OUTPUT_LOG_PATH,
+    REMOVE_IMAGES_AFTER_SEND,
     WRAP_TEXT,
     SettingsStore,
 )
@@ -77,6 +78,7 @@ class AppStartupTests(unittest.TestCase):
                     app = DeepbridCodeApp(root)
                     self.assertTrue(app.dark_theme)
                     self.assertTrue(app.wrap_text)
+                    self.assertTrue(app.remove_images_after_send)
                     self.assertTrue(root.geometry().startswith("1180x760"))
                     self.assertEqual(app.chat_output.cget("height"), 20)
                     self.assertEqual(app.message.cget("height"), 7)
@@ -217,7 +219,7 @@ class AppStartupTests(unittest.TestCase):
             finally:
                 root.destroy()
 
-    def test_directory_context_adds_text_files_and_ignores_non_text(self) -> None:
+    def test_directory_context_adds_supported_uploads_and_ignores_unsupported_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root_path = Path(temporary_directory)
             project = root_path / "project"
@@ -226,6 +228,7 @@ class AppStartupTests(unittest.TestCase):
             nested.mkdir(parents=True)
             (source / "main.py").write_text("print('hello')", encoding="utf-8")
             (nested / "README").write_text("read me", encoding="utf-8")
+            (nested / "report.pdf").write_bytes(b"\x00\x01document")
             (source / "asset.bin").write_bytes(b"\x00\x01\xff")
             root = tk.Tk()
             root.withdraw()
@@ -245,12 +248,12 @@ class AppStartupTests(unittest.TestCase):
                         app._show_file_context_menu(event)
                     app.file_context_menu.invoke(0)
 
-                    self.assertEqual(len(app.context_files), 2)
+                    self.assertEqual(len(app.context_files), 3)
                     self.assertEqual(
                         {context.label for context in app.context_files.values()},
-                        {"src/main.py", "src/nested/README"},
+                        {"src/main.py", "src/nested/README", "src/nested/report.pdf"},
                     )
-                    self.assertIn("Ignored 1 non-text file", app.status.get())
+                    self.assertIn("Ignored 1 unsupported file", app.status.get())
                     self.assertIn("asset.bin", {path.name for path in app.tree_paths.values()})
                     with (
                         patch.object(app.file_tree, "identify_row", return_value=item),
@@ -334,16 +337,16 @@ class AppStartupTests(unittest.TestCase):
                     self.assertTrue(item.external)
                     self.assertTrue(item.path.is_file())
                     self.assertEqual(
-                        app.pasted_images_tree.item("context:image:1", "text"),
+                        app.additional_files_tree.item("context:additional:1", "text"),
                         "* Clipboard image 1",
                     )
-                    self.assertIn("Pasted images (1)", app.pasted_images_label.cget("text"))
-                    self.assertEqual(len(app.pasted_image_thumbnails), 1)
+                    self.assertIn("Additional files (1)", app.additional_files_label.cget("text"))
+                    self.assertEqual(len(app.additional_file_thumbnails), 1)
                     self.assertIn("Added clipboard-1.png", app.status.get())
-                    app.pasted_images_tree.selection_set("context:image:1")
+                    app.additional_files_tree.selection_set("context:additional:1")
                     app._remove_selected_context()
                     self.assertFalse(app.context_files)
-                    self.assertFalse(app.pasted_images_frame.winfo_manager())
+                    self.assertFalse(app.additional_files_frame.winfo_manager())
                     app._cleanup_clipboard_images()
                     self.assertIsNone(app.clipboard_image_directory)
             finally:
@@ -378,11 +381,11 @@ class AppStartupTests(unittest.TestCase):
                     context_iid = app.context_tree_iids[
                         str(next(iter(app.context_files.values())).path)
                     ]
-                    self.assertTrue(app.pasted_images_tree.exists(context_iid))
-                    app.pasted_images_tree.selection_set(context_iid)
+                    self.assertTrue(app.additional_files_tree.exists(context_iid))
+                    app.additional_files_tree.selection_set(context_iid)
                     app._remove_selected_context()
                     self.assertEqual(len(app.context_files), 0)
-                    self.assertFalse(app.pasted_images_tree.exists(context_iid))
+                    self.assertFalse(app.additional_files_tree.exists(context_iid))
                     app._cleanup_clipboard_images()
             finally:
                 root.destroy()
@@ -404,6 +407,84 @@ class AppStartupTests(unittest.TestCase):
                     app = DeepbridCodeApp(root)
                     self.assertEqual(app._paste_clipboard_image(SimpleNamespace()), "break")
                     self.assertEqual(len(app.context_files), 1)
+                    app._cleanup_clipboard_images()
+            finally:
+                root.destroy()
+
+    def test_manual_file_picker_adds_external_uploads_to_additional_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            source = root_path / "large-report.pdf"
+            source.write_bytes(b"\x00binary document")
+            image = root_path / "manual-image.png"
+            Image.new("RGB", (4, 4), "blue").save(image)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    with patch(
+                        "src.app.filedialog.askopenfilenames",
+                        return_value=(str(source), str(image)),
+                    ) as picker:
+                        app._add_additional_files()
+
+                    picker.assert_called_once()
+                    self.assertEqual(len(app.context_files), 2)
+                    items = {item.path.name: item for item in app.context_files.values()}
+                    item = items[source.name]
+                    self.assertEqual(item.kind, "file")
+                    self.assertTrue(item.external)
+                    self.assertEqual(items[image.name].kind, "image")
+                    self.assertFalse(items[image.name].show_thumbnail)
+                    self.assertEqual(
+                        app.additional_files_tree.item(
+                            app.context_tree_iids[str(image.resolve())],
+                            "image",
+                        ),
+                        "",
+                    )
+                    self.assertIn(
+                        source.name,
+                        app.additional_files_tree.item(
+                            app.context_tree_iids[str(source.resolve())],
+                            "text",
+                        ),
+                    )
+                    self.assertIn(
+                        f"[Selected file: {source.name}]",
+                        build_prompt("Summarize this document", [item]),
+                    )
+                    self.assertIn("Additional files (2)", app.additional_files_label.cget("text"))
+            finally:
+                root.destroy()
+
+    def test_accepted_send_removes_image_context_when_preference_is_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                    patch("src.app.ImageGrab.grabclipboard", return_value=Image.new("RGB", (4, 4), "red")),
+                    patch.object(root, "after", return_value="after-id"),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app._paste_clipboard_image(SimpleNamespace())
+                    image_key = next(iter(app.context_files))
+                    app.pending_image_context_keys = [image_key]
+                    app.pending_remove_images_after_send = True
+                    app.chat_events.put(("chat-submitted", ""))
+                    app._poll_chat_events()
+
+                    self.assertNotIn(image_key, app.context_files)
+                    self.assertTrue(app.remove_images_after_send)
+                    self.assertTrue(app.settings.get_bool(REMOVE_IMAGES_AFTER_SEND, default=True))
                     app._cleanup_clipboard_images()
             finally:
                 root.destroy()
@@ -473,6 +554,8 @@ class AppStartupTests(unittest.TestCase):
                         app._set_dark_theme,
                         app.wrap_text,
                         app._set_wrap_text,
+                        app.remove_images_after_send,
+                        app._set_remove_images_after_send,
                         app.output_log_path,
                         app._set_output_logging,
                     )
@@ -480,6 +563,8 @@ class AppStartupTests(unittest.TestCase):
                     dialog._save_dark_theme()
                     dialog.wrap_text.set(False)
                     dialog._save_wrap_text()
+                    dialog.remove_images_after_send.set(False)
+                    dialog._save_remove_images_after_send()
                     self.assertFalse(hasattr(dialog, "output_log_enabled"))
                     log_path = root_path / "diagnostics.log"
                     dialog.output_log_path.set(str(log_path))
@@ -492,6 +577,10 @@ class AppStartupTests(unittest.TestCase):
                 self.assertTrue(app.settings.get_bool(DARK_THEME, default=False))
                 self.assertFalse(app.settings.get_bool(WRAP_TEXT, default=True))
                 self.assertFalse(app.wrap_text)
+                self.assertFalse(app.remove_images_after_send)
+                self.assertFalse(
+                    app.settings.get_bool(REMOVE_IMAGES_AFTER_SEND, default=True)
+                )
                 self.assertFalse(app.output_log_enabled)
                 self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), "")
                 self.assertEqual(dialog.status.get(), "Saved.")

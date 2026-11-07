@@ -10,6 +10,7 @@ from src.context import (
     context_kind,
     iter_project_files,
     read_text_context,
+    upload_context_kind,
 )
 
 
@@ -78,6 +79,29 @@ class ContextTests(unittest.TestCase):
             image.write_bytes(b"\x89PNG\r\n\x1a\nmore bytes")
 
             self.assertEqual(context_kind(image), "image")
+
+    def test_supported_upload_extensions_become_attachments_without_reading_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            document = root / "report.pdf"
+            document.write_bytes(b"\x00\x01binary document")
+            source = root / "main.py"
+            source.write_text("print('hello')", encoding="utf-8")
+            unsupported = root / "archive.bin"
+            unsupported.write_bytes(b"\x00\x01")
+
+            self.assertEqual(upload_context_kind(document), "file")
+            self.assertEqual(upload_context_kind(source), "file")
+            self.assertIsNone(upload_context_kind(unsupported))
+            prompt = build_prompt(
+                "Review these files",
+                [ContextFile(document, "file"), ContextFile(source, "file")],
+                root,
+            )
+            self.assertIn("[Selected file: report.pdf]", prompt)
+            self.assertIn("[Selected file: main.py]", prompt)
+            self.assertNotIn("binary document", prompt)
+            self.assertNotIn("print('hello')", prompt)
 
     def test_pasted_external_image_can_be_added_without_open_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

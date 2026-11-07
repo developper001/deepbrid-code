@@ -10,7 +10,7 @@ import traceback
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 from types import TracebackType
 
 from PIL import Image, ImageGrab, ImageTk
@@ -22,6 +22,9 @@ from .context import (
     context_kind,
     iter_project_files,
     read_text_context,
+    UPLOAD_FILE_EXTENSIONS,
+    UPLOAD_IMAGE_EXTENSIONS,
+    upload_context_kind,
 )
 from .logo import create_brand_icon
 from .settings import (
@@ -29,6 +32,7 @@ from .settings import (
     DARK_THEME,
     LAST_PROJECT,
     OUTPUT_LOG_PATH,
+    REMOVE_IMAGES_AFTER_SEND,
     WRAP_TEXT,
     SettingsStore,
 )
@@ -52,6 +56,10 @@ class DeepbridCodeApp:
         self.auto_open_chrome = self.settings.get_bool(AUTO_OPEN_CHROME, default=True)
         self.dark_theme = self.settings.get_bool(DARK_THEME, default=False)
         self.wrap_text = self.settings.get_bool(WRAP_TEXT, default=True)
+        self.remove_images_after_send = self.settings.get_bool(
+            REMOVE_IMAGES_AFTER_SEND,
+            default=True,
+        )
         self.output_log_path = self.settings.get(OUTPUT_LOG_PATH) or ""
         self.output_log_enabled = bool(self.output_log_path.strip())
         self.last_project = self.settings.get(LAST_PROJECT)
@@ -63,13 +71,15 @@ class DeepbridCodeApp:
         self.context_tree_iids: dict[str, str] = {}
         self.external_context_tree_items: dict[str, ContextFile] = {}
         self.next_external_tree_id = 1
-        self.pasted_image_thumbnails: dict[str, ImageTk.PhotoImage] = {}
+        self.additional_file_thumbnails: dict[str, ImageTk.PhotoImage] = {}
         self.preview_image: tk.PhotoImage | None = None
         self.preview_path: Path | None = None
         self.window_icons: tuple[tk.PhotoImage, ...] = ()
         self.clipboard_image_directory: tempfile.TemporaryDirectory[str] | None = None
         self.clipboard_images: set[Path] = set()
         self.cleanup_clipboard_after_chat = False
+        self.pending_image_context_keys: list[str] = []
+        self.pending_remove_images_after_send = True
         self.chat_browser = DeepbridChatBrowser(APP_DATA_DIR / "chrome-profile")
         self.chat_events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.console_events: queue.Queue[str] = queue.Queue()
@@ -157,33 +167,34 @@ class DeepbridCodeApp:
         self.file_tree.bind("<<TreeviewSelect>>", self._preview_selection)
         self.file_tree.bind("<Button-3>", self._show_file_context_menu)
         self.file_context_menu = tk.Menu(self.root, tearoff=False)
-        self.pasted_images_frame = ttk.Frame(files_panel)
-        self.pasted_images_frame.columnconfigure(0, weight=1)
-        self.pasted_images_label = ttk.Label(self.pasted_images_frame, text="Pasted images")
-        self.pasted_images_label.grid(row=0, column=0, sticky="w", pady=(2, 2))
-        self.pasted_images_tree = ttk.Treeview(
-            self.pasted_images_frame,
-            style="PastedImages.Treeview",
+        self.additional_files_frame = ttk.Frame(files_panel)
+        self.additional_files_frame.columnconfigure(0, weight=1)
+        self.additional_files_label = ttk.Label(self.additional_files_frame, text="Additional files (0)")
+        self.additional_files_label.grid(row=0, column=0, sticky="w", pady=(2, 2))
+        self.additional_files_tree = ttk.Treeview(
+            self.additional_files_frame,
+            style="AdditionalFiles.Treeview",
             show="tree",
             height=3,
             selectmode="extended",
         )
-        pasted_images_scrollbar = ttk.Scrollbar(
-            self.pasted_images_frame,
+        additional_files_scrollbar = ttk.Scrollbar(
+            self.additional_files_frame,
             orient="vertical",
-            command=self.pasted_images_tree.yview,
+            command=self.additional_files_tree.yview,
         )
-        self.pasted_images_tree.configure(yscrollcommand=pasted_images_scrollbar.set)
-        self.pasted_images_tree.grid(row=1, column=0, sticky="ew")
-        pasted_images_scrollbar.grid(row=1, column=1, sticky="ns")
-        self.pasted_images_tree.bind("<Button-3>", self._show_pasted_image_menu)
-        self.pasted_image_menu = tk.Menu(self.root, tearoff=False)
-        self.pasted_image_menu.add_command(
+        self.additional_files_tree.configure(yscrollcommand=additional_files_scrollbar.set)
+        self.additional_files_tree.grid(row=1, column=0, sticky="ew")
+        additional_files_scrollbar.grid(row=1, column=1, sticky="ns")
+        self.additional_files_tree.bind("<Button-3>", self._show_additional_file_menu)
+        self.additional_files_tree.bind("<Configure>", self._refresh_additional_file_labels)
+        self.additional_file_menu = tk.Menu(self.root, tearoff=False)
+        self.additional_file_menu.add_command(
             label="Remove from context",
             command=self._remove_selected_context,
         )
-        self.pasted_images_frame.grid(row=2, column=0, sticky="ew")
-        self.pasted_images_frame.grid_remove()
+        self.additional_files_frame.grid(row=2, column=0, sticky="ew")
+        self.additional_files_frame.grid_remove()
         ttk.Label(files_panel, text="Preview").grid(
             row=3,
             column=0,
@@ -232,6 +243,12 @@ class DeepbridCodeApp:
         self.message.bind("<Control-Return>", self._insert_message_newline)
         actions = ttk.Frame(chat_panel)
         actions.pack(fill="x")
+        self.add_files_button = ttk.Button(
+            actions,
+            text="Add files...",
+            command=self._add_additional_files,
+        )
+        self.add_files_button.pack(side="left", pady=(4, 0))
         self.send_button = ttk.Button(actions, text="Send", command=self._send)
         self.send_button.pack(
             side="right",
@@ -268,6 +285,43 @@ class DeepbridCodeApp:
         if not selected:
             return
         self._load_project(Path(selected))
+
+    def _add_additional_files(self) -> None:
+        extensions = sorted(UPLOAD_FILE_EXTENSIONS | UPLOAD_IMAGE_EXTENSIONS)
+        patterns = " ".join(f"*{extension}" for extension in extensions)
+        selected = filedialog.askopenfilenames(
+            parent=self.root,
+            title="Add files to context",
+            filetypes=(("Supported files", patterns), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        candidates: list[ContextFile] = []
+        skipped: list[str] = []
+        errors: list[str] = []
+        for selected_path in selected:
+            path = Path(selected_path)
+            try:
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("not a regular file")
+                kind = upload_context_kind(path)
+                if kind is None:
+                    skipped.append(path.name)
+                    continue
+                resolved_path = path.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError) as error:
+                errors.append(f"{path.name}: {error}")
+                continue
+            candidates.append(
+                ContextFile(
+                    resolved_path,
+                    kind,
+                    external=True,
+                    label=resolved_path.name,
+                    show_thumbnail=False,
+                )
+            )
+        self._include_context(candidates, skipped, errors)
 
     def _size_initial_panes(self, _event: tk.Event) -> None:
         if self._initial_sash_set:
@@ -308,9 +362,9 @@ class DeepbridCodeApp:
         self.context_tree_iids.clear()
         self.external_context_tree_items.clear()
         self.next_external_tree_id = 1
-        self.pasted_image_thumbnails.clear()
-        self.pasted_images_tree.delete(*self.pasted_images_tree.get_children())
-        self.pasted_images_frame.grid_remove()
+        self.additional_file_thumbnails.clear()
+        self.additional_files_tree.delete(*self.additional_files_tree.get_children())
+        self.additional_files_frame.grid_remove()
         children = self.file_tree.get_children()
         if children:
             self.file_tree.delete(*children)
@@ -372,6 +426,8 @@ class DeepbridCodeApp:
                 self._set_dark_theme,
                 self.wrap_text,
                 self._set_wrap_text,
+                self.remove_images_after_send,
+                self._set_remove_images_after_send,
                 self.output_log_path,
                 self._set_output_logging,
             )
@@ -388,6 +444,9 @@ class DeepbridCodeApp:
     def _set_wrap_text(self, enabled: bool) -> None:
         self.wrap_text = enabled
         self.preview.configure(wrap="word" if enabled else "none")
+
+    def _set_remove_images_after_send(self, enabled: bool) -> None:
+        self.remove_images_after_send = enabled
 
     def _set_output_logging(self, path: str) -> None:
         normalized_path = str(Path(path).expanduser()) if path.strip() else ""
@@ -600,7 +659,7 @@ class DeepbridCodeApp:
             foreground=[("selected", colors["foreground"])],
         )
         style.configure(
-            "PastedImages.Treeview",
+            "AdditionalFiles.Treeview",
             background=colors["field"],
             fieldbackground=colors["field"],
             foreground=colors["foreground"],
@@ -608,7 +667,7 @@ class DeepbridCodeApp:
             rowheight=40,
         )
         style.map(
-            "PastedImages.Treeview",
+            "AdditionalFiles.Treeview",
             background=[("selected", colors["selection"])],
             foreground=[("selected", colors["foreground"])],
         )
@@ -656,7 +715,7 @@ class DeepbridCodeApp:
             activebackground=colors["selection"],
             activeforeground=colors["foreground"],
         )
-        self.pasted_image_menu.configure(
+        self.additional_file_menu.configure(
             background=colors["surface"],
             foreground=colors["foreground"],
             activebackground=colors["selection"],
@@ -727,13 +786,13 @@ class DeepbridCodeApp:
         except (OSError, RuntimeError, ValueError):
             return False
 
-    def _show_pasted_image_menu(self, event: tk.Event) -> str:
-        row = self.pasted_images_tree.identify_row(event.y)
+    def _show_additional_file_menu(self, event: tk.Event) -> str:
+        row = self.additional_files_tree.identify_row(event.y)
         if not row:
             return "break"
-        if row not in self.pasted_images_tree.selection():
-            self.pasted_images_tree.selection_set(row)
-        self.pasted_image_menu.tk_popup(event.x_root, event.y_root)
+        if row not in self.additional_files_tree.selection():
+            self.additional_files_tree.selection_set(row)
+        self.additional_file_menu.tk_popup(event.x_root, event.y_root)
         return "break"
 
     def _start_progress(self) -> None:
@@ -754,7 +813,7 @@ class DeepbridCodeApp:
             return
         self.preview_path = path
         try:
-            kind = context_kind(path)
+            kind = upload_context_kind(path)
         except (OSError, ValueError) as error:
             self._set_preview(f"Could not inspect {path.name}: {error}")
             return
@@ -783,6 +842,10 @@ class DeepbridCodeApp:
                     image="",
                     text=f"Preview unavailable ({error}); the image can still be selected.",
                 )
+        elif kind == "file":
+            self.preview_image = None
+            self.preview_image_label.configure(image="", text="")
+            self._set_preview(f"Attached file: {path.name}")
         else:
             self.preview_image = None
             self.preview_image_label.configure(image="", text="")
@@ -817,7 +880,7 @@ class DeepbridCodeApp:
             try:
                 if path.is_symlink():
                     raise ValueError(f"{path.name} became a symbolic link.")
-                kind = context_kind(path)
+                kind = upload_context_kind(path)
             except (OSError, ValueError) as error:
                 errors.append(f"{path.name}: {error}")
                 continue
@@ -843,8 +906,8 @@ class DeepbridCodeApp:
                 continue
             for path in files:
                 try:
-                    kind = context_kind(path)
-                    if kind != "text":
+                    kind = upload_context_kind(path)
+                    if kind is None:
                         ignored_count += 1
                         continue
                     resolved_path = path.resolve(strict=True)
@@ -853,13 +916,13 @@ class DeepbridCodeApp:
                     errors.append(f"{path.name}: {error}")
                     continue
                 candidates.append(
-                    ContextFile(resolved_path, "text", label=relative_path.as_posix())
+                    ContextFile(resolved_path, kind, label=relative_path.as_posix())
                 )
             self._log(
-                f"Added text files from directory {relative_directory.as_posix()}."
+                f"Added supported files from directory {relative_directory.as_posix()}."
             )
         if ignored_count:
-            skipped.append(f"Ignored {ignored_count} non-text file(s)")
+            skipped.append(f"Ignored {ignored_count} unsupported file(s)")
         if not candidates and not skipped and not errors:
             skipped.append("No eligible files found in the selection")
         self._include_context(candidates, skipped, errors)
@@ -903,29 +966,35 @@ class DeepbridCodeApp:
 
     def _mark_context_in_tree(self, key: str, item: ContextFile) -> None:
         if item.external:
-            iid = f"context:image:{self.next_external_tree_id}"
+            iid = f"context:additional:{self.next_external_tree_id}"
             self.next_external_tree_id += 1
-            label = item.label or item.path.name
+            has_thumbnail = item.kind == "image" and item.show_thumbnail
+            label = (
+                item.label or item.path.name
+                if has_thumbnail
+                else self._truncate_additional_path(item.path)
+            )
             thumbnail: ImageTk.PhotoImage | None = None
-            try:
-                with Image.open(item.path) as image:
-                    image.thumbnail((48, 36))
-                    thumbnail = ImageTk.PhotoImage(image.copy(), master=self.root)
-            except (OSError, RuntimeError, ValueError) as error:
-                self._log(f"Could not create pasted image thumbnail {item.path.name}: {error}")
-            self.pasted_images_tree.insert(
-                "",
-                "end",
-                iid=iid,
-                text=f"* {label}",
-                image=thumbnail,
-            )
+            if has_thumbnail:
+                try:
+                    with Image.open(item.path) as image:
+                        image.thumbnail((48, 36))
+                        thumbnail = ImageTk.PhotoImage(image.copy(), master=self.root)
+                except (OSError, RuntimeError, ValueError) as error:
+                    self._log(f"Could not create image thumbnail {item.path.name}: {error}")
+            insert_options: dict[str, object] = {
+                "iid": iid,
+                "text": f"* {label}",
+            }
             if thumbnail is not None:
-                self.pasted_image_thumbnails[iid] = thumbnail
-            self.pasted_images_label.configure(
-                text=f"Pasted images ({len(self.external_context_tree_items) + 1})"
+                insert_options["image"] = thumbnail
+            self.additional_files_tree.insert("", "end", **insert_options)
+            if thumbnail is not None:
+                self.additional_file_thumbnails[iid] = thumbnail
+            self.additional_files_label.configure(
+                text=f"Additional files ({len(self.external_context_tree_items) + 1})"
             )
-            self.pasted_images_frame.grid()
+            self.additional_files_frame.grid()
             self.external_context_tree_items[iid] = item
         else:
             iid = next(
@@ -943,6 +1012,23 @@ class DeepbridCodeApp:
                 )
         if iid is not None:
             self.context_tree_iids[key] = iid
+
+    def _truncate_additional_path(self, path: Path) -> str:
+        width = max(80, self.additional_files_tree.winfo_width() - 90)
+        font = tkfont.nametofont("TkDefaultFont")
+        filename = path.name
+        prefix = f"{path.parent}{os.sep}"
+        while prefix and font.measure(f"...{prefix}{filename}") > width:
+            prefix = prefix[1:]
+        return f"...{prefix}{filename}" if prefix else filename
+
+    def _refresh_additional_file_labels(self, _event: tk.Event) -> None:
+        for iid, item in self.external_context_tree_items.items():
+            if item.kind != "image" or not item.show_thumbnail:
+                self.additional_files_tree.item(
+                    iid,
+                    text=f"* {self._truncate_additional_path(item.path)}",
+                )
 
     def _paste_clipboard_image(self, _event: tk.Event) -> str | None:
         try:
@@ -1039,7 +1125,7 @@ class DeepbridCodeApp:
     def _remove_selected_context(self) -> None:
         selected_rows = set(self.file_tree.selection())
         keys = self._context_keys_for_project_rows(selected_rows)
-        selected_images = set(self.pasted_images_tree.selection())
+        selected_images = set(self.additional_files_tree.selection())
         keys.extend(
             key
             for key, tree_iid in self.context_tree_iids.items()
@@ -1059,10 +1145,10 @@ class DeepbridCodeApp:
             self.context_order.remove(key)
             if item.external:
                 self.external_context_tree_items.pop(iid, None)
-                self.pasted_image_thumbnails.pop(iid, None)
-                self.pasted_images_tree.delete(iid)
-                self.pasted_images_label.configure(
-                    text=f"Pasted images ({len(self.external_context_tree_items)})"
+                self.additional_file_thumbnails.pop(iid, None)
+                self.additional_files_tree.delete(iid)
+                self.additional_files_label.configure(
+                    text=f"Additional files ({len(self.external_context_tree_items)})"
                 )
             else:
                 if self.file_tree.exists(iid):
@@ -1075,7 +1161,7 @@ class DeepbridCodeApp:
             self._log(f"Removed context: {item.label or item.path.name}.")
             removed += 1
         if not self.external_context_tree_items:
-            self.pasted_images_frame.grid_remove()
+            self.additional_files_frame.grid_remove()
         self.status.set(
             f"Removed {removed} context item(s). "
             f"{len(self.context_files)} item(s) remain included."
@@ -1101,28 +1187,39 @@ class DeepbridCodeApp:
             self.status.set("Add a message or context before sending.")
             return
 
-        image_paths = [
-            item.path for item in self.context_files.values() if item.kind == "image"
-        ]
-        external_image_paths = [
+        attachment_paths = [
             item.path
             for item in self.context_files.values()
-            if item.kind == "image" and item.external
+            if item.kind in {"image", "file"}
         ]
+        external_attachment_paths = [
+            item.path
+            for item in self.context_files.values()
+            if item.kind in {"image", "file"} and item.external
+        ]
+        self.pending_image_context_keys = [
+            key
+            for key, item in self.context_files.items()
+            if item.kind == "image"
+        ]
+        self.pending_remove_images_after_send = self.remove_images_after_send
         self.chat_request_active = True
         self._log(
             f"Sending prompt with {len(self.context_files)} context item(s) "
-            f"and {len(image_paths)} image(s)."
+            f"and {len(attachment_paths)} attachment(s)."
         )
         self._append_chat("You", prompt)
-        if image_paths:
-            self._append_chat("Images attached", "\n".join(path.name for path in image_paths))
+        if attachment_paths:
+            self._append_chat(
+                "Files attached",
+                "\n".join(path.name for path in attachment_paths),
+            )
         self.message.delete("1.0", "end")
         self.status.set("Sending message to Deepbrid AI Chat. Waiting for its response...")
         self._start_progress()
         worker = threading.Thread(
             target=self._chat_worker,
-            args=(prompt, image_paths, self.project_root, external_image_paths),
+            args=(prompt, attachment_paths, self.project_root, external_attachment_paths),
             name="deepbrid-chat-ui",
             daemon=True,
         )
@@ -1130,22 +1227,24 @@ class DeepbridCodeApp:
             worker.start()
         except RuntimeError as error:
             self.chat_request_active = False
+            self.pending_image_context_keys = []
             self._stop_progress()
             self.status.set(f"Could not start the chat request: {error}")
 
     def _chat_worker(
         self,
         prompt: str,
-        image_paths: list[Path],
+        attachment_paths: list[Path],
         project_root: Path | None,
-        external_image_paths: list[Path],
+        external_attachment_paths: list[Path],
     ) -> None:
         try:
             response = self.chat_browser.send_message(
                 prompt,
-                image_paths,
+                attachment_paths,
                 project_root,
-                external_image_paths,
+                external_attachment_paths,
+                on_submitted=lambda: self.chat_events.put(("chat-submitted", "")),
             )
         except BrowserLaunchError as error:
             self._log(f"Chat request failed: {error}")
@@ -1166,7 +1265,7 @@ class DeepbridCodeApp:
                 event, content = self.chat_events.get_nowait()
             except queue.Empty:
                 break
-            if event.startswith("chat-"):
+            if event in {"chat-success", "chat-error"}:
                 self.chat_request_active = False
                 self._stop_progress()
             elif event.startswith("browser-"):
@@ -1179,6 +1278,10 @@ class DeepbridCodeApp:
             elif event == "chat-error":
                 self._append_chat("Deepbrid AI Chat status", content)
                 self.status.set(content)
+            elif event == "chat-submitted":
+                if self.pending_remove_images_after_send:
+                    self._remove_context_keys(self.pending_image_context_keys)
+                self.pending_image_context_keys = []
             elif event == "browser-chat":
                 self._log("Deepbrid AI Chat is open and ready.")
                 self.status.set("Deepbrid AI Chat is open and ready.")
