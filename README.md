@@ -77,7 +77,9 @@ attached by the app.
    with `*` in the project tree. Selecting or previewing a file alone does not
    include or send it.
 3. Right-click a marked file and choose **Remove selected from context** to
-   exclude it.
+   exclude it. Right-click a directory and choose
+   **Remove directory contents from context** to exclude all included files
+   beneath it.
 4. Enter your question in **Message**, then choose **Send to Deepbrid AI Chat**
    to send the message and listed context.
 
@@ -89,10 +91,11 @@ for later messages. Review marked files before sending, especially for secrets;
 see the per-file and total text limits above.
 
 You can paste a screenshot from the clipboard into the **Message** box with
-Ctrl+V. Clipboard screenshots and copied image-file paths are added to the
-**Pasted images** group in the project tree and attached with your next message;
-pasting does not send anything by itself. Pasted images are held in a temporary
-local folder and removed when the app closes.
+Ctrl+V. Clipboard screenshots and copied image-file paths appear as thumbnails
+in the **Pasted images** section below the project tree, and are attached with
+your next message; right-click an image to remove it. Pasting does not send
+anything by itself. Pasted images are held in a temporary local folder and
+removed when the app closes.
 
 The app opens at 1180x760, with the project files pane using about one quarter
 of the window width and most space reserved for chat. Each prompt in the
@@ -100,10 +103,11 @@ in-memory conversation is preceded by a timestamped separator.
 
 ## Console and preferences
 
-Open **Console** to view timestamped application diagnostics and errors. The
-console keeps the latest messages in memory while the app is running. To retain
-them across runs, open **Settings**, enable **Append console logs to a file**,
-and choose a log file.
+Open **Console** to view timestamped application diagnostics and errors in a
+resizable panel at the bottom of the window. The console keeps the latest
+messages in memory while the app is running. To retain them across runs, set a
+log file path in **Settings**; file logging is enabled whenever the path is
+nonempty. Use **Clear** to remove the path and disable file logging.
 
 The app remembers the last project folder and reopens it next time. Both
 preferences, the automatic Chrome startup setting, and the dark theme choice

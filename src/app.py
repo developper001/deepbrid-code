@@ -28,7 +28,6 @@ from .settings import (
     AUTO_OPEN_CHROME,
     DARK_THEME,
     LAST_PROJECT,
-    OUTPUT_LOG_ENABLED,
     OUTPUT_LOG_PATH,
     WRAP_TEXT,
     SettingsStore,
@@ -53,8 +52,8 @@ class DeepbridCodeApp:
         self.auto_open_chrome = self.settings.get_bool(AUTO_OPEN_CHROME, default=True)
         self.dark_theme = self.settings.get_bool(DARK_THEME, default=False)
         self.wrap_text = self.settings.get_bool(WRAP_TEXT, default=True)
-        self.output_log_enabled = self.settings.get_bool(OUTPUT_LOG_ENABLED, default=False)
         self.output_log_path = self.settings.get(OUTPUT_LOG_PATH) or ""
+        self.output_log_enabled = bool(self.output_log_path.strip())
         self.last_project = self.settings.get(LAST_PROJECT)
         self.project_root: Path | None = None
         self.tree_paths: dict[str, Path] = {}
@@ -63,8 +62,8 @@ class DeepbridCodeApp:
         self.context_order: list[str] = []
         self.context_tree_iids: dict[str, str] = {}
         self.external_context_tree_items: dict[str, ContextFile] = {}
-        self.pasted_context_group: str | None = None
         self.next_external_tree_id = 1
+        self.pasted_image_thumbnails: dict[str, ImageTk.PhotoImage] = {}
         self.preview_image: tk.PhotoImage | None = None
         self.preview_path: Path | None = None
         self.window_icons: tuple[tk.PhotoImage, ...] = ()
@@ -75,8 +74,8 @@ class DeepbridCodeApp:
         self.chat_events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.console_events: queue.Queue[str] = queue.Queue()
         self.console_history: deque[str] = deque(maxlen=2000)
-        self.console_window: tk.Toplevel | None = None
         self.console_output: tk.Text | None = None
+        self.console_visible = False
         self._log_lock = threading.Lock()
         self._previous_callback_exception = self.root.report_callback_exception
         self._poll_after_id: str | None = None
@@ -89,11 +88,11 @@ class DeepbridCodeApp:
         self._apply_theme()
         self.root.report_callback_exception = self._report_callback_exception
         self.root.bind("<Destroy>", self._on_root_destroy, add="+")
-        if self.output_log_enabled:
+        if self.output_log_path:
             try:
                 self._validate_output_log_path(self.output_log_path)
             except (OSError, ValueError) as error:
-                self.output_log_enabled = False
+                self.output_log_path = ""
                 self.status.set(f"Could not enable saved log file: {error}")
                 self._log(f"Could not enable saved log file: {error}")
         self._log("Deepbrid Code started.")
@@ -123,9 +122,11 @@ class DeepbridCodeApp:
         self.project_label = ttk.Label(toolbar, text="No project open")
         self.project_label.pack(side="left", padx=12)
 
-        main = ttk.Panedwindow(self.root, orient="horizontal")
+        self.workspace = ttk.Panedwindow(self.root, orient="vertical")
+        self.workspace.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        main = ttk.Panedwindow(self.workspace, orient="horizontal")
         self.main_pane = main
-        main.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.workspace.add(main, weight=4)
 
         files_panel = ttk.Frame(main, padding=4)
         chat_panel = ttk.Frame(main, padding=4)
@@ -156,15 +157,46 @@ class DeepbridCodeApp:
             label="Remove selected from context",
             command=self._remove_selected_context,
         )
+        self.file_context_menu.add_command(
+            label="Remove directory contents from context",
+            command=self._remove_selected_context,
+        )
+        self.pasted_images_frame = ttk.Frame(files_panel)
+        self.pasted_images_frame.columnconfigure(0, weight=1)
+        self.pasted_images_label = ttk.Label(self.pasted_images_frame, text="Pasted images")
+        self.pasted_images_label.grid(row=0, column=0, sticky="w", pady=(2, 2))
+        self.pasted_images_tree = ttk.Treeview(
+            self.pasted_images_frame,
+            style="PastedImages.Treeview",
+            show="tree",
+            height=3,
+            selectmode="extended",
+        )
+        pasted_images_scrollbar = ttk.Scrollbar(
+            self.pasted_images_frame,
+            orient="vertical",
+            command=self.pasted_images_tree.yview,
+        )
+        self.pasted_images_tree.configure(yscrollcommand=pasted_images_scrollbar.set)
+        self.pasted_images_tree.grid(row=1, column=0, sticky="ew")
+        pasted_images_scrollbar.grid(row=1, column=1, sticky="ns")
+        self.pasted_images_tree.bind("<Button-3>", self._show_pasted_image_menu)
+        self.pasted_image_menu = tk.Menu(self.root, tearoff=False)
+        self.pasted_image_menu.add_command(
+            label="Remove from context",
+            command=self._remove_selected_context,
+        )
+        self.pasted_images_frame.grid(row=2, column=0, sticky="ew")
+        self.pasted_images_frame.grid_remove()
         ttk.Label(files_panel, text="Preview").grid(
-            row=2,
+            row=3,
             column=0,
             sticky="w",
             pady=(0, 4),
         )
         preview_frame = ttk.Frame(files_panel)
-        preview_frame.grid(row=3, column=0, sticky="nsew")
-        files_panel.rowconfigure(3, weight=2)
+        preview_frame.grid(row=4, column=0, sticky="nsew")
+        files_panel.rowconfigure(4, weight=2)
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
         self.preview = tk.Text(
@@ -188,7 +220,7 @@ class DeepbridCodeApp:
         self.preview_yscroll.grid(row=0, column=1, sticky="ns")
         self.preview_xscroll.grid(row=1, column=0, sticky="ew")
         self.preview_image_label = ttk.Label(files_panel)
-        self.preview_image_label.grid(row=4, column=0, sticky="ew")
+        self.preview_image_label.grid(row=5, column=0, sticky="ew")
 
         ttk.Label(chat_panel, text="Conversation (kept in memory only)").pack(anchor="w")
         self.chat_output = tk.Text(chat_panel, height=20, wrap="word", state="disabled")
@@ -214,6 +246,30 @@ class DeepbridCodeApp:
         )
         self.progress = ttk.Progressbar(self.root, mode="indeterminate")
         self.progress.configure(style="Busy.Horizontal.TProgressbar")
+
+        self.console_panel = ttk.Frame(self.workspace, padding=(4, 2, 4, 4))
+        console_controls = ttk.Frame(self.console_panel)
+        console_controls.pack(fill="x")
+        ttk.Button(console_controls, text="Hide console", command=self._close_console).pack(
+            side="left"
+        )
+        ttk.Button(console_controls, text="Clear", command=self._clear_console).pack(
+            side="right"
+        )
+        self.console_output = tk.Text(
+            self.console_panel,
+            height=8,
+            wrap="word",
+            state="disabled",
+        )
+        console_scrollbar = ttk.Scrollbar(
+            self.console_panel,
+            orient="vertical",
+            command=self.console_output.yview,
+        )
+        self.console_output.configure(yscrollcommand=console_scrollbar.set)
+        self.console_output.pack(side="left", fill="both", expand=True)
+        console_scrollbar.pack(side="right", fill="y")
 
     def _open_folder(self) -> None:
         selected = filedialog.askdirectory(title="Open project folder")
@@ -245,8 +301,10 @@ class DeepbridCodeApp:
         self.context_order.clear()
         self.context_tree_iids.clear()
         self.external_context_tree_items.clear()
-        self.pasted_context_group = None
         self.next_external_tree_id = 1
+        self.pasted_image_thumbnails.clear()
+        self.pasted_images_tree.delete(*self.pasted_images_tree.get_children())
+        self.pasted_images_frame.grid_remove()
         children = self.file_tree.get_children()
         if children:
             self.file_tree.delete(*children)
@@ -308,7 +366,6 @@ class DeepbridCodeApp:
                 self._set_dark_theme,
                 self.wrap_text,
                 self._set_wrap_text,
-                self.output_log_enabled,
                 self.output_log_path,
                 self._set_output_logging,
             )
@@ -326,22 +383,19 @@ class DeepbridCodeApp:
         self.wrap_text = enabled
         self.preview.configure(wrap="word" if enabled else "none")
 
-    def _set_output_logging(self, enabled: bool, path: str) -> None:
+    def _set_output_logging(self, path: str) -> None:
         normalized_path = str(Path(path).expanduser()) if path.strip() else ""
-        if enabled and not normalized_path:
-            raise ValueError("Choose a log file before enabling output logging.")
-        if enabled:
+        if normalized_path:
             self._validate_output_log_path(normalized_path)
         try:
             self.settings.set(OUTPUT_LOG_PATH, normalized_path)
-            self.settings.set_bool(OUTPUT_LOG_ENABLED, enabled)
         except (OSError, sqlite3.Error):
             raise
         self.output_log_path = normalized_path
-        self.output_log_enabled = enabled
+        self.output_log_enabled = bool(normalized_path)
         self._log(
             f"File logging enabled: {normalized_path}"
-            if enabled
+            if normalized_path
             else "File logging disabled."
         )
 
@@ -392,39 +446,19 @@ class DeepbridCodeApp:
         self._log(f"Unhandled UI exception:\n{details}")
 
     def _open_console(self) -> None:
-        if self.console_window is not None and self.console_window.winfo_exists():
-            self.console_window.deiconify()
-            self.console_window.lift()
+        if self.console_visible:
             return
-        window = tk.Toplevel(self.root)
-        window.title("Deepbrid Code Console")
-        window.geometry("800x420")
-        window.minsize(480, 260)
-        window.transient(self.root)
-        controls = ttk.Frame(window, padding=(6, 6, 6, 0))
-        controls.pack(fill="x")
-        ttk.Button(controls, text="Clear", command=self._clear_console).pack(side="right")
-        output = tk.Text(window, wrap="word", state="disabled")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=output.yview)
-        output.configure(yscrollcommand=scrollbar.set)
-        output.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        self.console_window = window
-        self.console_output = output
-        self._apply_console_theme()
-        with self._log_lock:
-            history = list(self.console_history)
-            while True:
-                try:
-                    self.console_events.get_nowait()
-                except queue.Empty:
-                    break
-        output.configure(state="normal")
-        if history:
-            output.insert("end", "\n".join(history) + "\n")
-        output.see("end")
-        output.configure(state="disabled")
-        window.protocol("WM_DELETE_WINDOW", self._close_console)
+        self.workspace.add(self.console_panel, weight=1)
+        self.console_visible = True
+        self.root.after_idle(self._size_console_pane)
+        self._poll_console_events()
+
+    def _size_console_pane(self) -> None:
+        if not self.console_visible:
+            return
+        height = self.workspace.winfo_height()
+        if height > 300:
+            self.workspace.sashpos(0, height - 220)
 
     def _clear_console(self) -> None:
         if self.console_output is None:
@@ -434,10 +468,9 @@ class DeepbridCodeApp:
         self.console_output.configure(state="disabled")
 
     def _close_console(self) -> None:
-        if self.console_window is not None:
-            self.console_window.destroy()
-        self.console_window = None
-        self.console_output = None
+        if self.console_visible:
+            self.workspace.forget(self.console_panel)
+            self.console_visible = False
 
     def _apply_console_theme(self) -> None:
         if self.console_output is None:
@@ -516,6 +549,17 @@ class DeepbridCodeApp:
             foreground=colors["foreground"],
             padding=(8, 4),
         )
+        style.configure(
+            "TEntry",
+            fieldbackground=colors["field"],
+            foreground=colors["foreground"],
+            insertcolor=colors["foreground"],
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("readonly", colors["field"])],
+            foreground=[("readonly", colors["foreground"])],
+        )
         style.map(
             "TButton",
             background=[("active", colors["accent"]), ("disabled", colors["surface"])],
@@ -544,6 +588,19 @@ class DeepbridCodeApp:
         )
         style.map(
             "Treeview",
+            background=[("selected", colors["selection"])],
+            foreground=[("selected", colors["foreground"])],
+        )
+        style.configure(
+            "PastedImages.Treeview",
+            background=colors["field"],
+            fieldbackground=colors["field"],
+            foreground=colors["foreground"],
+            bordercolor=colors["border"],
+            rowheight=40,
+        )
+        style.map(
+            "PastedImages.Treeview",
             background=[("selected", colors["selection"])],
             foreground=[("selected", colors["foreground"])],
         )
@@ -591,6 +648,12 @@ class DeepbridCodeApp:
             activebackground=colors["selection"],
             activeforeground=colors["foreground"],
         )
+        self.pasted_image_menu.configure(
+            background=colors["surface"],
+            foreground=colors["foreground"],
+            activebackground=colors["selection"],
+            activeforeground=colors["foreground"],
+        )
         self.logo_image = create_brand_icon(self.root, self.dark_theme, 48)
         self.logo_label.configure(image=self.logo_image)
         self._set_window_icons()
@@ -611,13 +674,23 @@ class DeepbridCodeApp:
             self.file_tree.selection_set(row)
             self.file_tree.focus(row)
         if row in self.tree_directories:
+            directory = self.tree_directories[row]
+            has_directory_context = any(
+                self._is_context_under_directory(item, directory)
+                for item in self.context_files.values()
+            )
             self.file_context_menu.entryconfigure(
                 0,
                 label="Add text files in directory to context",
-                command=lambda path=self.tree_directories[row]: self._add_directory_context(path),
+                command=lambda path=directory: self._add_directory_context(path),
                 state="normal",
             )
             self.file_context_menu.entryconfigure(1, state="disabled")
+            self.file_context_menu.entryconfigure(
+                2,
+                command=lambda path=directory: self._remove_directory_context(path),
+                state="normal" if has_directory_context else "disabled",
+            )
         else:
             selected_rows = set(self.file_tree.selection())
             has_selected_context = any(
@@ -634,7 +707,26 @@ class DeepbridCodeApp:
                 1,
                 state="normal" if has_selected_context else "disabled",
             )
+            self.file_context_menu.entryconfigure(2, state="disabled")
         self.file_context_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _is_context_under_directory(self, item: ContextFile, directory: Path) -> bool:
+        if item.external or self.project_root is None:
+            return False
+        try:
+            item.path.resolve(strict=False).relative_to(directory.resolve(strict=False))
+            return True
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    def _show_pasted_image_menu(self, event: tk.Event) -> str:
+        row = self.pasted_images_tree.identify_row(event.y)
+        if not row:
+            return "break"
+        if row not in self.pasted_images_tree.selection():
+            self.pasted_images_tree.selection_set(row)
+        self.pasted_image_menu.tk_popup(event.x_root, event.y_root)
         return "break"
 
     def _start_progress(self) -> None:
@@ -818,25 +910,29 @@ class DeepbridCodeApp:
 
     def _mark_context_in_tree(self, key: str, item: ContextFile) -> None:
         if item.external:
-            if self.pasted_context_group is None:
-                self.pasted_context_group = "context:pasted"
-                self.file_tree.insert(
-                    "",
-                    "end",
-                    iid=self.pasted_context_group,
-                    text="Pasted images",
-                    open=True,
-                )
             iid = f"context:image:{self.next_external_tree_id}"
             self.next_external_tree_id += 1
             label = item.label or item.path.name
-            self.file_tree.insert(
-                self.pasted_context_group,
+            thumbnail: ImageTk.PhotoImage | None = None
+            try:
+                with Image.open(item.path) as image:
+                    image.thumbnail((48, 36))
+                    thumbnail = ImageTk.PhotoImage(image.copy(), master=self.root)
+            except (OSError, RuntimeError, ValueError) as error:
+                self._log(f"Could not create pasted image thumbnail {item.path.name}: {error}")
+            self.pasted_images_tree.insert(
+                "",
                 "end",
                 iid=iid,
                 text=f"* {label}",
+                image=thumbnail,
             )
-            self.tree_paths[iid] = item.path
+            if thumbnail is not None:
+                self.pasted_image_thumbnails[iid] = thumbnail
+            self.pasted_images_label.configure(
+                text=f"Pasted images ({len(self.external_context_tree_items) + 1})"
+            )
+            self.pasted_images_frame.grid()
             self.external_context_tree_items[iid] = item
         else:
             iid = next(
@@ -948,29 +1044,44 @@ class DeepbridCodeApp:
         )
 
     def _remove_selected_context(self) -> None:
-        selected = self.file_tree.selection()
+        selected = set(self.file_tree.selection()) | set(
+            self.pasted_images_tree.selection()
+        )
+        keys = [
+            key
+            for key, tree_iid in self.context_tree_iids.items()
+            if tree_iid in selected
+        ]
+        self._remove_context_keys(keys)
+
+    def _remove_directory_context(self, directory: Path) -> None:
+        keys = [
+            key
+            for key, item in self.context_files.items()
+            if self._is_context_under_directory(item, directory)
+        ]
+        self._remove_context_keys(keys)
+
+    def _remove_context_keys(self, keys: list[str]) -> None:
         removed = 0
-        for iid in selected:
-            key = next(
-                (
-                    context_key
-                    for context_key, tree_iid in self.context_tree_iids.items()
-                    if tree_iid == iid
-                ),
-                None,
-            )
-            if key is None:
+        for key in keys:
+            iid = self.context_tree_iids.get(key)
+            if iid is None:
                 continue
             item = self.context_files[key]
             self.context_tree_iids.pop(key, None)
             self.context_files.pop(key, None)
             self.context_order.remove(key)
             if item.external:
-                self.tree_paths.pop(iid, None)
                 self.external_context_tree_items.pop(iid, None)
-                self.file_tree.delete(iid)
+                self.pasted_image_thumbnails.pop(iid, None)
+                self.pasted_images_tree.delete(iid)
+                self.pasted_images_label.configure(
+                    text=f"Pasted images ({len(self.external_context_tree_items)})"
+                )
             else:
-                self.file_tree.item(iid, text=item.path.name)
+                if self.file_tree.exists(iid):
+                    self.file_tree.item(iid, text=item.path.name)
             if self.preview_path == item.path:
                 self.preview_path = None
                 self.preview_image = None
@@ -978,11 +1089,8 @@ class DeepbridCodeApp:
                 self._set_preview("")
             self._log(f"Removed context: {item.label or item.path.name}.")
             removed += 1
-        if self.pasted_context_group and not self.file_tree.get_children(
-            self.pasted_context_group
-        ):
-            self.file_tree.delete(self.pasted_context_group)
-            self.pasted_context_group = None
+        if not self.external_context_tree_items:
+            self.pasted_images_frame.grid_remove()
         self.status.set(
             f"Removed {removed} context item(s). "
             f"{len(self.context_files)} item(s) remain included."
@@ -1165,7 +1273,7 @@ class DeepbridCodeApp:
             self.cleanup_clipboard_after_chat = True
         else:
             self._cleanup_clipboard_images()
-        if self.console_window is not None:
+        if self.console_visible:
             self._close_console()
         self.root.destroy()
 

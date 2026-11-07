@@ -16,7 +16,6 @@ from src.settings import (
     AUTO_OPEN_CHROME,
     DARK_THEME,
     LAST_PROJECT,
-    OUTPUT_LOG_ENABLED,
     OUTPUT_LOG_PATH,
     WRAP_TEXT,
     SettingsStore,
@@ -234,6 +233,14 @@ class AppStartupTests(unittest.TestCase):
                     )
                     self.assertIn("Ignored 1 non-text file", app.status.get())
                     self.assertIn("asset.bin", {path.name for path in app.tree_paths.values()})
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=item),
+                        patch.object(app.file_context_menu, "tk_popup"),
+                    ):
+                        app._show_file_context_menu(event)
+                    app.file_context_menu.invoke(2)
+                    self.assertFalse(app.context_files)
+                    self.assertEqual(app.file_tree.item("f:src/main.py", "text"), "main.py")
             finally:
                 root.destroy()
 
@@ -258,10 +265,16 @@ class AppStartupTests(unittest.TestCase):
                     self.assertTrue(item.external)
                     self.assertTrue(item.path.is_file())
                     self.assertEqual(
-                        app.file_tree.item("context:image:1", "text"),
+                        app.pasted_images_tree.item("context:image:1", "text"),
                         "* Clipboard image 1",
                     )
+                    self.assertIn("Pasted images (1)", app.pasted_images_label.cget("text"))
+                    self.assertEqual(len(app.pasted_image_thumbnails), 1)
                     self.assertIn("Added clipboard-1.png", app.status.get())
+                    app.pasted_images_tree.selection_set("context:image:1")
+                    app._remove_selected_context()
+                    self.assertFalse(app.context_files)
+                    self.assertFalse(app.pasted_images_frame.winfo_manager())
                     app._cleanup_clipboard_images()
                     self.assertIsNone(app.clipboard_image_directory)
             finally:
@@ -296,16 +309,11 @@ class AppStartupTests(unittest.TestCase):
                     context_iid = app.context_tree_iids[
                         str(next(iter(app.context_files.values())).path)
                     ]
-                    self.assertTrue(app.file_tree.exists(context_iid))
-                    event = SimpleNamespace(y=10, x_root=20, y_root=30)
-                    with (
-                        patch.object(app.file_tree, "identify_row", return_value=context_iid),
-                        patch.object(app.file_context_menu, "tk_popup"),
-                    ):
-                        app._show_file_context_menu(event)
-                    app.file_context_menu.invoke(1)
+                    self.assertTrue(app.pasted_images_tree.exists(context_iid))
+                    app.pasted_images_tree.selection_set(context_iid)
+                    app._remove_selected_context()
                     self.assertEqual(len(app.context_files), 0)
-                    self.assertFalse(app.file_tree.exists(context_iid))
+                    self.assertFalse(app.pasted_images_tree.exists(context_iid))
                     app._cleanup_clipboard_images()
             finally:
                 root.destroy()
@@ -396,7 +404,6 @@ class AppStartupTests(unittest.TestCase):
                         app._set_dark_theme,
                         app.wrap_text,
                         app._set_wrap_text,
-                        app.output_log_enabled,
                         app.output_log_path,
                         app._set_output_logging,
                     )
@@ -404,17 +411,26 @@ class AppStartupTests(unittest.TestCase):
                     dialog._save_dark_theme()
                     dialog.wrap_text.set(False)
                     dialog._save_wrap_text()
+                    self.assertFalse(hasattr(dialog, "output_log_enabled"))
+                    log_path = root_path / "diagnostics.log"
+                    dialog.output_log_path.set(str(log_path))
+                    dialog._save_output_logging()
+                    self.assertTrue(app.output_log_enabled)
+                    self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), str(log_path))
+                    dialog._clear_output_log_path()
 
                 self.assertTrue(app.dark_theme)
                 self.assertTrue(app.settings.get_bool(DARK_THEME, default=False))
                 self.assertFalse(app.settings.get_bool(WRAP_TEXT, default=True))
                 self.assertFalse(app.wrap_text)
+                self.assertFalse(app.output_log_enabled)
+                self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), "")
                 self.assertEqual(dialog.status.get(), "Saved.")
                 dialog.dialog.destroy()
             finally:
                 root.destroy()
 
-    def test_console_displays_logs_and_optional_file_logging_persists(self) -> None:
+    def test_bottom_console_and_path_controlled_file_logging(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root_path = Path(temporary_directory)
             log_path = root_path / "logs" / "deepbrid-code.log"
@@ -426,22 +442,27 @@ class AppStartupTests(unittest.TestCase):
                     patch("src.app.APP_DATA_DIR", root_path),
                 ):
                     app = DeepbridCodeApp(root)
-                    app._set_output_logging(True, str(log_path))
+                    app._set_output_logging(str(log_path))
                     app._log("A diagnostic message")
                     app._open_console()
 
                     self.assertTrue(log_path.is_file())
+                    self.assertIn(str(app.console_panel), app.workspace.panes())
+                    self.assertTrue(app.console_visible)
                     self.assertIn("A diagnostic message", log_path.read_text(encoding="utf-8"))
                     self.assertIn(
                         "A diagnostic message",
                         app.console_output.get("1.0", "end"),
                     )
-                    self.assertTrue(app.settings.get_bool(OUTPUT_LOG_ENABLED, default=False))
                     self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), str(log_path))
                     self.assertIn("A diagnostic message", app.console_history[-1])
                     app._close_console()
-                    app._set_output_logging(False, str(log_path))
+                    self.assertNotIn(str(app.console_panel), app.workspace.panes())
+                    self.assertFalse(app.console_visible)
+                    app._set_output_logging("")
                     app._log("Not written to file")
+                    self.assertFalse(app.output_log_enabled)
+                    self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), "")
                     self.assertNotIn(
                         "Not written to file",
                         log_path.read_text(encoding="utf-8"),

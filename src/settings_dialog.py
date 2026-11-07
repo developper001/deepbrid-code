@@ -23,9 +23,8 @@ class SettingsDialog:
         on_dark_theme_changed: Callable[[bool], None],
         wrap_text: bool,
         on_wrap_text_changed: Callable[[bool], None],
-        output_log_enabled: bool,
         output_log_path: str,
-        on_output_logging_changed: Callable[[bool, str], None],
+        on_output_logging_changed: Callable[[str], None],
     ) -> None:
         self.settings = settings
         self.on_auto_open_changed = on_auto_open_changed
@@ -120,34 +119,43 @@ class SettingsDialog:
             sticky="w",
             pady=(0, 6),
         )
-        self.output_log_enabled = tk.BooleanVar(
-            master=self.dialog,
-            value=output_log_enabled,
-        )
         self.output_log_path = tk.StringVar(
             master=self.dialog,
             value=output_log_path,
         )
         self.output_log_status = tk.StringVar(master=self.dialog)
-        ttk.Checkbutton(
-            content,
-            text="Append console logs to a file",
-            variable=self.output_log_enabled,
-            command=self._save_output_logging,
-        ).grid(row=9, column=0, sticky="w")
+        self.output_log_status.set(
+            "Console output is appended to this file."
+            if output_log_path
+            else "File logging is disabled."
+        )
+        ttk.Label(content, text="Log file path (empty disables file logging)").grid(
+            row=9,
+            column=0,
+            sticky="w",
+        )
         log_path_controls = ttk.Frame(content)
         log_path_controls.grid(row=10, column=0, sticky="ew", pady=(6, 0))
         log_path_controls.columnconfigure(0, weight=1)
         ttk.Entry(
             log_path_controls,
             textvariable=self.output_log_path,
-            state="readonly",
         ).grid(row=0, column=0, sticky="ew")
         ttk.Button(
             log_path_controls,
             text="Browse...",
             command=self._browse_output_log,
         ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(
+            log_path_controls,
+            text="Save",
+            command=self._save_output_logging,
+        ).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(
+            log_path_controls,
+            text="Clear",
+            command=self._clear_output_log_path,
+        ).grid(row=0, column=3, padx=(8, 0))
         ttk.Label(content, textvariable=self.output_log_status).grid(
             row=11,
             column=0,
@@ -170,7 +178,6 @@ class SettingsDialog:
         self.saved_enabled = auto_open_chrome
         self.saved_dark_theme = dark_theme
         self.saved_wrap_text = wrap_text
-        self.saved_output_log_enabled = output_log_enabled
         self.saved_output_log_path = output_log_path
 
     def _save(self) -> None:
@@ -213,20 +220,17 @@ class SettingsDialog:
         self.status.set("Saved.")
 
     def _save_output_logging(self) -> None:
-        enabled = self.output_log_enabled.get()
         path = self.output_log_path.get()
         try:
-            self.on_output_logging_changed(enabled, path)
+            self.on_output_logging_changed(path)
         except (OSError, ValueError, sqlite3.Error) as error:
-            self.output_log_enabled.set(self.saved_output_log_enabled)
             self.output_log_path.set(self.saved_output_log_path)
             self.output_log_status.set(f"Could not save output log setting: {error}")
             return
-        self.saved_output_log_enabled = enabled
         self.saved_output_log_path = path
         self.output_log_status.set(
             "Console output is appended to the selected file."
-            if enabled
+            if path.strip()
             else "File logging is disabled."
         )
 
@@ -241,4 +245,8 @@ class SettingsDialog:
         if not selected:
             return
         self.output_log_path.set(selected)
+        self._save_output_logging()
+
+    def _clear_output_log_path(self) -> None:
+        self.output_log_path.set("")
         self._save_output_logging()
