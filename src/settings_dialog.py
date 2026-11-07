@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Protocol
 
-from .settings import AUTO_OPEN_CHROME
+from .settings import AUTO_OPEN_CHROME, DARK_THEME
 
 
 class SettingsBackend(Protocol):
@@ -19,9 +19,12 @@ class SettingsDialog:
         settings: SettingsBackend,
         auto_open_chrome: bool,
         on_auto_open_changed: Callable[[bool], None],
+        dark_theme: bool,
+        on_dark_theme_changed: Callable[[bool], None],
     ) -> None:
         self.settings = settings
         self.on_auto_open_changed = on_auto_open_changed
+        self.on_dark_theme_changed = on_dark_theme_changed
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Settings")
         self.dialog.geometry("640x400")
@@ -42,6 +45,12 @@ class SettingsDialog:
             relief="solid",
             padding=(10, 6),
         ).pack(fill="x")
+        ttk.Label(
+            navigation,
+            text="Appearance",
+            relief="solid",
+            padding=(10, 6),
+        ).pack(fill="x", pady=(6, 0))
 
         content = ttk.Frame(frame, padding=12, relief="groove")
         content.grid(row=0, column=1, sticky="nsew")
@@ -70,8 +79,22 @@ class SettingsDialog:
             wraplength=420,
             justify="left",
         ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Separator(content).grid(row=3, column=0, sticky="ew", pady=(16, 12))
+        ttk.Label(content, text="Appearance", font=("TkDefaultFont", 12, "bold")).grid(
+            row=4,
+            column=0,
+            sticky="w",
+            pady=(0, 8),
+        )
+        self.dark_theme = tk.BooleanVar(master=self.dialog, value=dark_theme)
+        ttk.Checkbutton(
+            content,
+            text="Use dark mode",
+            variable=self.dark_theme,
+            command=self._save_dark_theme,
+        ).grid(row=5, column=0, sticky="w")
         ttk.Label(content, textvariable=self.status).grid(
-            row=3,
+            row=6,
             column=0,
             sticky="w",
             pady=(12, 0),
@@ -84,6 +107,7 @@ class SettingsDialog:
         )
         self.dialog.grab_set()
         self.saved_enabled = auto_open_chrome
+        self.saved_dark_theme = dark_theme
 
     def _save(self) -> None:
         enabled = self.enabled.get()
@@ -95,4 +119,19 @@ class SettingsDialog:
             return
         self.saved_enabled = enabled
         self.on_auto_open_changed(enabled)
+        self.status.set("Saved.")
+
+    def _save_dark_theme(self) -> None:
+        enabled = self.dark_theme.get()
+        try:
+            self.settings.set_bool(DARK_THEME, enabled)
+        except (OSError, sqlite3.Error) as error:
+            self.dark_theme.set(self.saved_dark_theme)
+            self.status.set(f"Could not save setting: {error}")
+            return
+        self.saved_dark_theme = enabled
+        self.on_dark_theme_changed(enabled)
+        self.dialog.configure(
+            background="#202522" if enabled else "#f0f2f0",
+        )
         self.status.set("Saved.")

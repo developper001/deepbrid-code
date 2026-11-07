@@ -7,6 +7,7 @@ from typing import Iterator
 
 
 AUTO_OPEN_CHROME = "auto_open_chrome"
+DARK_THEME = "dark_theme"
 LAST_PROJECT = "last_project"
 
 

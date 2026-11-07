@@ -4,10 +4,12 @@ import tempfile
 import tkinter as tk
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.app import DeepbridCodeApp
-from src.settings import AUTO_OPEN_CHROME, LAST_PROJECT, SettingsStore
+from src.settings import AUTO_OPEN_CHROME, DARK_THEME, LAST_PROJECT, SettingsStore
+from src.settings_dialog import SettingsDialog
 
 
 class AppStartupTests(unittest.TestCase):
@@ -56,6 +58,90 @@ class AppStartupTests(unittest.TestCase):
 
                 self.assertTrue(app.auto_open_chrome)
                 open_browser.assert_called_once_with(startup=True)
+            finally:
+                root.destroy()
+
+    def test_dark_theme_is_restored_and_progress_is_hidden_when_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            store = SettingsStore(root_path / "settings.sqlite3")
+            store.set_bool(DARK_THEME, True)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", store.database_path),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    self.assertTrue(app.dark_theme)
+                    self.assertEqual(app.preview.cget("background"), "#171c19")
+                    self.assertFalse(app.progress.winfo_manager())
+
+                    app._start_progress()
+                    self.assertEqual(app.progress.winfo_manager(), "pack")
+                    app._stop_progress()
+                    self.assertFalse(app.progress.winfo_manager())
+            finally:
+                root.destroy()
+
+    def test_project_file_context_menu_adds_the_selected_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            project = root_path / "project"
+            project.mkdir()
+            (project / "main.py").write_text("print('hello')", encoding="utf-8")
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    app._load_project(project)
+                    item = "f:main.py"
+                    event = SimpleNamespace(y=10, x_root=20, y_root=30)
+                    with (
+                        patch.object(app.file_tree, "identify_row", return_value=item),
+                        patch.object(app.file_context_menu, "tk_popup") as popup,
+                    ):
+                        self.assertEqual(app._show_file_context_menu(event), "break")
+                    self.assertEqual(app.file_tree.selection(), (item,))
+                    popup.assert_called_once_with(20, 30)
+
+                    app.file_context_menu.invoke(0)
+                    self.assertEqual(len(app.context_files), 1)
+                    self.assertIn("main.py (text)", app.context_list.get(0))
+            finally:
+                root.destroy()
+
+    def test_settings_dialog_persists_dark_theme_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    dialog = SettingsDialog(
+                        root,
+                        app.settings,
+                        app.auto_open_chrome,
+                        app._set_auto_open_chrome,
+                        app.dark_theme,
+                        app._set_dark_theme,
+                    )
+                    dialog.dark_theme.set(True)
+                    dialog._save_dark_theme()
+
+                self.assertTrue(app.dark_theme)
+                self.assertTrue(app.settings.get_bool(DARK_THEME, default=False))
+                self.assertEqual(dialog.status.get(), "Saved.")
+                dialog.dialog.destroy()
             finally:
                 root.destroy()
 

@@ -41,6 +41,8 @@ rendered response or an error/timeout in the conversation and status bar.
 **Copy prompt for Deepbrid AI Chat** remains available for manual use. If
 Chrome is installed in a non-standard location, set
 `DEEPBRID_CHROME_PATH` to its executable before launching the app.
+The progress bar is shown only while Chrome is opening or a chat request is in
+progress.
 
 This UI integration is necessarily brittle: Deepbrid may change its chat page,
 which can require updating the visible-control selectors. If the page cannot
@@ -49,7 +51,8 @@ leaves the browser available for manual use. It does not inspect network
 requests or depend on undocumented chat APIs.
 
 The app stores preferences in `%LOCALAPPDATA%\Deepbrid Code\settings.sqlite3`,
-including the automatic Chrome setting and the last opened project folder.
+including the automatic Chrome setting, dark theme choice, and last opened
+project folder.
 
 ## Privacy and project files
 
@@ -66,9 +69,10 @@ attached by the app.
 
 1. Open a project folder. Select a file in **Project files** to preview it.
 2. Select one or more files (Ctrl-click or Shift-click for multiple selection)
-   and click **Add selected to context**. Supported text files and images then
-   appear in **Included context**, along with their project-relative paths and
-   types. Selecting or previewing a file alone does not include or send it.
+   and click **Add selected to context**, or right-click a selected file and
+   choose the same command. Supported text files and images then appear in
+   **Included context**, along with their project-relative paths and types.
+   Selecting or previewing a file alone does not include or send it.
 3. To exclude an item, select it in **Included context** and click
    **Remove selected context**.
 4. Enter your question in **Message**, then choose **Send to Deepbrid AI Chat**
@@ -86,8 +90,15 @@ for secrets; see the per-file and total text limits above.
 ## Preferences
 
 The app remembers the last project folder and reopens it next time. Both
-preferences and the automatic Chrome startup setting are stored in SQLite at
+preferences, the automatic Chrome startup setting, and the dark theme choice
+are stored in SQLite at
 `%LOCALAPPDATA%\Deepbrid Code\settings.sqlite3`. Automatic Chrome startup is
-enabled by default and can be changed in **Settings**.
+enabled by default and can be changed in **Settings**. Toggle **Use dark mode**
+there to switch and save the app's appearance.
+
+The app does not impose a separate character limit on the message field. Text
+context has a 256 KiB per-file limit and a 1 MiB total limit. Deepbrid AI Chat's
+maximum accepted message length is not documented here, so very large prompts
+may still be rejected or truncated by the website.
 
 Official API transport and richer project navigation are not implemented.

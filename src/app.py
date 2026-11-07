@@ -16,7 +16,8 @@ from .context import (
     iter_project_files,
     read_text_context,
 )
-from .settings import AUTO_OPEN_CHROME, LAST_PROJECT, SettingsStore
+from .logo import create_brand_icon
+from .settings import AUTO_OPEN_CHROME, DARK_THEME, LAST_PROJECT, SettingsStore
 from .settings_dialog import SettingsDialog
 
 APP_DATA_DIR = Path(
@@ -33,6 +34,7 @@ class DeepbridCodeApp:
         self.root.geometry("1100x720")
         self.settings = SettingsStore(SETTINGS_DATABASE)
         self.auto_open_chrome = self.settings.get_bool(AUTO_OPEN_CHROME, default=True)
+        self.dark_theme = self.settings.get_bool(DARK_THEME, default=False)
         self.last_project = self.settings.get(LAST_PROJECT)
         self.project_root: Path | None = None
         self.tree_paths: dict[str, Path] = {}
@@ -45,12 +47,17 @@ class DeepbridCodeApp:
         self.browser_request_active = False
 
         self._build_ui()
+        self._apply_theme()
         self.root.after(200, self._poll_chat_events)
         self.root.after(100, self._startup)
 
     def _build_ui(self) -> None:
         toolbar = ttk.Frame(self.root, padding=8)
         toolbar.pack(fill="x")
+        self.logo_image = create_brand_icon(self.root, self.dark_theme)
+        self.root.iconphoto(True, self.logo_image)
+        self.logo_label = ttk.Label(toolbar, image=self.logo_image)
+        self.logo_label.pack(side="left", padx=(0, 8))
         ttk.Button(toolbar, text="Open folder...", command=self._open_folder).pack(side="left")
         ttk.Button(toolbar, text="Open Deepbrid AI Chat", command=self._open_browser).pack(
             side="left", padx=(8, 0)
@@ -76,6 +83,12 @@ class DeepbridCodeApp:
         self.file_tree = ttk.Treeview(files_panel, show="tree", selectmode="extended")
         self.file_tree.pack(fill="both", expand=True)
         self.file_tree.bind("<<TreeviewSelect>>", self._preview_selection)
+        self.file_tree.bind("<Button-3>", self._show_file_context_menu)
+        self.file_context_menu = tk.Menu(self.root, tearoff=False)
+        self.file_context_menu.add_command(
+            label="Add selected to context",
+            command=self._add_context,
+        )
         ttk.Button(files_panel, text="Add selected to context", command=self._add_context).pack(
             fill="x", pady=(6, 0)
         )
@@ -118,7 +131,7 @@ class DeepbridCodeApp:
             fill="x", side="bottom"
         )
         self.progress = ttk.Progressbar(self.root, mode="indeterminate")
-        self.progress.pack(fill="x", side="bottom")
+        self.progress.configure(style="Busy.Horizontal.TProgressbar")
 
     def _open_folder(self) -> None:
         selected = filedialog.askdirectory(title="Open project folder")
@@ -192,12 +205,158 @@ class DeepbridCodeApp:
                 self.settings,
                 self.auto_open_chrome,
                 self._set_auto_open_chrome,
+                self.dark_theme,
+                self._set_dark_theme,
             )
         except (OSError, sqlite3.Error) as error:
             self.status.set(f"Could not open Settings: {error}")
 
     def _set_auto_open_chrome(self, enabled: bool) -> None:
         self.auto_open_chrome = enabled
+
+    def _set_dark_theme(self, enabled: bool) -> None:
+        self.dark_theme = enabled
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        if self.dark_theme:
+            colors = {
+                "background": "#202522",
+                "surface": "#2b332f",
+                "foreground": "#e8eee9",
+                "disabled_foreground": "#7f8983",
+                "field": "#171c19",
+                "accent": "#7898ff",
+                "selection": "#2e426e",
+                "border": "#56615b",
+            }
+        else:
+            colors = {
+                "background": "#f0f2f0",
+                "surface": "#ffffff",
+                "foreground": "#202b25",
+                "disabled_foreground": "#89928c",
+                "field": "#ffffff",
+                "accent": "#3569f6",
+                "selection": "#dbe6ff",
+                "border": "#aab5c2",
+            }
+        self.theme_colors = colors
+        self.root.configure(background=colors["background"])
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure(
+            ".",
+            background=colors["background"],
+            foreground=colors["foreground"],
+        )
+        style.configure("TFrame", background=colors["background"])
+        style.configure(
+            "TLabel",
+            background=colors["background"],
+            foreground=colors["foreground"],
+        )
+        style.configure(
+            "TButton",
+            background=colors["surface"],
+            foreground=colors["foreground"],
+            padding=(8, 4),
+        )
+        style.map(
+            "TButton",
+            background=[("active", colors["accent"]), ("disabled", colors["surface"])],
+            foreground=[
+                ("active", colors["foreground"]),
+                ("disabled", colors["disabled_foreground"]),
+            ],
+        )
+        style.configure(
+            "TCheckbutton",
+            background=colors["background"],
+            foreground=colors["foreground"],
+        )
+        style.map(
+            "TCheckbutton",
+            background=[("active", colors["background"])],
+            foreground=[("disabled", colors["disabled_foreground"])],
+        )
+        style.configure(
+            "Treeview",
+            background=colors["field"],
+            fieldbackground=colors["field"],
+            foreground=colors["foreground"],
+            bordercolor=colors["border"],
+            rowheight=22,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", colors["selection"])],
+            foreground=[("selected", colors["foreground"])],
+        )
+        style.configure(
+            "TProgressbar",
+            background=colors["accent"],
+            troughcolor=colors["surface"],
+            bordercolor=colors["border"],
+        )
+        style.configure(
+            "Busy.Horizontal.TProgressbar",
+            background=colors["accent"],
+            troughcolor=colors["surface"],
+            bordercolor=colors["border"],
+        )
+        self.preview.configure(
+            background=colors["field"],
+            foreground=colors["foreground"],
+            insertbackground=colors["foreground"],
+            selectbackground=colors["selection"],
+        )
+        self.chat_output.configure(
+            background=colors["field"],
+            foreground=colors["foreground"],
+            insertbackground=colors["foreground"],
+            selectbackground=colors["selection"],
+        )
+        self.message.configure(
+            background=colors["field"],
+            foreground=colors["foreground"],
+            insertbackground=colors["foreground"],
+            selectbackground=colors["selection"],
+        )
+        self.context_list.configure(
+            background=colors["field"],
+            foreground=colors["foreground"],
+            selectbackground=colors["selection"],
+            selectforeground=colors["foreground"],
+        )
+        self.file_context_menu.configure(
+            background=colors["surface"],
+            foreground=colors["foreground"],
+            activebackground=colors["selection"],
+            activeforeground=colors["foreground"],
+        )
+        self.logo_image = create_brand_icon(self.root, self.dark_theme)
+        self.logo_label.configure(image=self.logo_image)
+        self.root.iconphoto(True, self.logo_image)
+
+    def _show_file_context_menu(self, event: tk.Event) -> str:
+        row = self.file_tree.identify_row(event.y)
+        if not row:
+            return "break"
+        if row not in self.file_tree.selection():
+            self.file_tree.selection_set(row)
+            self.file_tree.focus(row)
+        self.file_context_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _start_progress(self) -> None:
+        if not self.progress.winfo_manager():
+            self.progress.pack(fill="x", side="bottom")
+        self.progress.start(12)
+
+    def _stop_progress(self) -> None:
+        self.progress.stop()
+        self.progress.pack_forget()
 
     def _preview_selection(self, _event: tk.Event) -> None:
         selection = self.file_tree.selection()
@@ -334,7 +493,7 @@ class DeepbridCodeApp:
             self._append_chat("Images attached", "\n".join(path.name for path in image_paths))
         self.message.delete("1.0", "end")
         self.status.set("Sending message to Deepbrid AI Chat. Waiting for its response...")
-        self.progress.start(12)
+        self._start_progress()
         worker = threading.Thread(
             target=self._chat_worker,
             args=(prompt, image_paths, self.project_root),
@@ -345,7 +504,7 @@ class DeepbridCodeApp:
             worker.start()
         except RuntimeError as error:
             self.chat_request_active = False
-            self.progress.stop()
+            self._stop_progress()
             self.status.set(f"Could not start the chat request: {error}")
 
     def _chat_worker(
@@ -371,10 +530,10 @@ class DeepbridCodeApp:
                 break
             if event.startswith("chat-"):
                 self.chat_request_active = False
-                self.progress.stop()
+                self._stop_progress()
             elif event.startswith("browser-"):
                 self.browser_request_active = False
-                self.progress.stop()
+                self._stop_progress()
             if event == "chat-success":
                 self._append_chat("Deepbrid AI", content)
                 self.status.set(f"Deepbrid AI Chat replied ({len(content)} characters).")
@@ -408,7 +567,7 @@ class DeepbridCodeApp:
         self.status.set(
             "Opening Deepbrid AI Chat..." if not startup else "Opening Chrome on startup..."
         )
-        self.progress.start(12)
+        self._start_progress()
         worker = threading.Thread(
             target=self._browser_worker,
             name="deepbrid-chat-browser",
@@ -418,7 +577,7 @@ class DeepbridCodeApp:
             worker.start()
         except RuntimeError as error:
             self.browser_request_active = False
-            self.progress.stop()
+            self._stop_progress()
             self.status.set(f"Could not start Chrome: {error}")
 
     def _browser_worker(self) -> None:
