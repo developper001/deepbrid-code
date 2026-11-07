@@ -80,8 +80,8 @@ attached by the app.
    exclude it. Right-click a directory and choose
    **Remove directory contents from context** to exclude all included files
    beneath it.
-4. Enter your question in **Message**, then choose **Send to Deepbrid AI Chat**
-   to send the message and listed context.
+4. Enter your question in **Message** and choose **Send**, or press Enter to
+   send the message and listed context. Use Ctrl+Enter to insert a newline.
 
 Included context is kept locally in the app until you send a prompt.
 When sent, selected text is included with its file path and contents, and
@@ -103,11 +103,11 @@ in-memory conversation is preceded by a timestamped separator.
 
 ## Console and preferences
 
-Open **Console** to view timestamped application diagnostics and errors in a
-resizable panel at the bottom of the window. The console keeps the latest
-messages in memory while the app is running. To retain them across runs, set a
-log file path in **Settings**; file logging is enabled whenever the path is
-nonempty. Use **Clear** to remove the path and disable file logging.
+Use **Toggle Console** to show or hide timestamped application diagnostics and
+errors in a resizable panel at the bottom of the window. The console keeps the
+latest messages in memory while the app is running. To retain them across runs,
+set a log file path in **Settings**; file logging is enabled whenever the path
+is nonempty. Clear the path in Settings to disable file logging.
 
 The app remembers the last project folder and reopens it next time. Both
 preferences, the automatic Chrome startup setting, and the dark theme choice

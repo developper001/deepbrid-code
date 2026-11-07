@@ -115,7 +115,12 @@ class DeepbridCodeApp:
             side="left",
             padx=(8, 0),
         )
-        ttk.Button(toolbar, text="Console", command=self._open_console).pack(
+        self.console_toggle_button = ttk.Button(
+            toolbar,
+            text="Toggle Console",
+            command=self._toggle_console,
+        )
+        self.console_toggle_button.pack(
             side="left",
             padx=(8, 0),
         )
@@ -133,8 +138,9 @@ class DeepbridCodeApp:
         main.add(files_panel, weight=1)
         main.add(chat_panel, weight=3)
         main.bind("<Configure>", self._size_initial_panes, add="+")
+        main.bind("<Configure>", self._size_project_tree, add="+")
 
-        files_panel.rowconfigure(1, weight=3)
+        files_panel.rowconfigure(1, weight=0, minsize=220)
         files_panel.columnconfigure(0, weight=1)
         ttk.Label(
             files_panel,
@@ -144,6 +150,7 @@ class DeepbridCodeApp:
             files_panel,
             show="tree",
             selectmode="extended",
+            height=10,
         )
         self.file_tree.grid(row=1, column=0, sticky="nsew")
         self.file_tree.bind("<<TreeviewSelect>>", self._preview_selection)
@@ -196,7 +203,7 @@ class DeepbridCodeApp:
         )
         preview_frame = ttk.Frame(files_panel)
         preview_frame.grid(row=4, column=0, sticky="nsew")
-        files_panel.rowconfigure(4, weight=2)
+        files_panel.rowconfigure(4, weight=1)
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
         self.preview = tk.Text(
@@ -232,10 +239,14 @@ class DeepbridCodeApp:
         self.message.bind("<Control-v>", self._paste_clipboard_image)
         self.message.bind("<Control-V>", self._paste_clipboard_image)
         self.message.bind("<Shift-Insert>", self._paste_clipboard_image)
+        self.message.bind("<Return>", self._send_on_return)
+        self.message.bind("<Control-Return>", self._insert_message_newline)
         actions = ttk.Frame(chat_panel)
         actions.pack(fill="x")
-        ttk.Button(actions, text="Send to Deepbrid AI Chat", command=self._send).pack(
-            fill="x", pady=(4, 0)
+        self.send_button = ttk.Button(actions, text="Send", command=self._send)
+        self.send_button.pack(
+            side="right",
+            pady=(4, 0),
         )
 
         self.status = tk.StringVar(
@@ -248,14 +259,6 @@ class DeepbridCodeApp:
         self.progress.configure(style="Busy.Horizontal.TProgressbar")
 
         self.console_panel = ttk.Frame(self.workspace, padding=(4, 2, 4, 4))
-        console_controls = ttk.Frame(self.console_panel)
-        console_controls.pack(fill="x")
-        ttk.Button(console_controls, text="Hide console", command=self._close_console).pack(
-            side="left"
-        )
-        ttk.Button(console_controls, text="Clear", command=self._clear_console).pack(
-            side="right"
-        )
         self.console_output = tk.Text(
             self.console_panel,
             height=8,
@@ -285,6 +288,20 @@ class DeepbridCodeApp:
             return
         self.main_pane.sashpos(0, max(220, int(width * 0.25)))
         self._initial_sash_set = True
+
+    def _size_project_tree(self, _event: tk.Event) -> None:
+        height = self.main_pane.winfo_height()
+        if height > 1:
+            self.file_tree.master.rowconfigure(1, minsize=max(180, int(height * 0.45)))
+
+    def _send_on_return(self, _event: tk.Event) -> str:
+        self._send()
+        return "break"
+
+    @staticmethod
+    def _insert_message_newline(event: tk.Event) -> str:
+        event.widget.insert("insert", "\n")
+        return "break"
 
     def _load_project(self, root: Path) -> None:
         if not root.is_dir():
@@ -445,8 +462,9 @@ class DeepbridCodeApp:
         ).rstrip()
         self._log(f"Unhandled UI exception:\n{details}")
 
-    def _open_console(self) -> None:
+    def _toggle_console(self) -> None:
         if self.console_visible:
+            self._close_console()
             return
         self.workspace.add(self.console_panel, weight=1)
         self.console_visible = True
@@ -459,13 +477,6 @@ class DeepbridCodeApp:
         height = self.workspace.winfo_height()
         if height > 300:
             self.workspace.sashpos(0, height - 220)
-
-    def _clear_console(self) -> None:
-        if self.console_output is None:
-            return
-        self.console_output.configure(state="normal")
-        self.console_output.delete("1.0", "end")
-        self.console_output.configure(state="disabled")
 
     def _close_console(self) -> None:
         if self.console_visible:

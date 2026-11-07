@@ -80,6 +80,15 @@ class AppStartupTests(unittest.TestCase):
                     self.assertTrue(root.geometry().startswith("1180x760"))
                     self.assertEqual(app.chat_output.cget("height"), 20)
                     self.assertEqual(app.message.cget("height"), 7)
+                    self.assertEqual(app.file_tree.cget("height"), 10)
+                    self.assertEqual(app.file_tree.master.grid_rowconfigure(1, "weight"), 0)
+                    self.assertEqual(app.file_tree.master.grid_rowconfigure(4, "weight"), 1)
+                    self.assertEqual(app.console_toggle_button.cget("text"), "Toggle Console")
+                    self.assertEqual(app.send_button.cget("text"), "Send")
+                    self.assertEqual(app.send_button.pack_info()["side"], "right")
+                    with patch.object(app.main_pane, "winfo_height", return_value=600):
+                        app._size_project_tree(SimpleNamespace())
+                    self.assertEqual(app.file_tree.master.grid_rowconfigure(1, "minsize"), 270)
                     self.assertEqual((app.logo_image.width(), app.logo_image.height()), (48, 48))
                     self.assertEqual(
                         [icon.width() for icon in app.window_icons],
@@ -444,7 +453,7 @@ class AppStartupTests(unittest.TestCase):
                     app = DeepbridCodeApp(root)
                     app._set_output_logging(str(log_path))
                     app._log("A diagnostic message")
-                    app._open_console()
+                    app._toggle_console()
 
                     self.assertTrue(log_path.is_file())
                     self.assertIn(str(app.console_panel), app.workspace.panes())
@@ -456,7 +465,7 @@ class AppStartupTests(unittest.TestCase):
                     )
                     self.assertEqual(app.settings.get(OUTPUT_LOG_PATH), str(log_path))
                     self.assertIn("A diagnostic message", app.console_history[-1])
-                    app._close_console()
+                    app._toggle_console()
                     self.assertNotIn(str(app.console_panel), app.workspace.panes())
                     self.assertFalse(app.console_visible)
                     app._set_output_logging("")
@@ -467,6 +476,32 @@ class AppStartupTests(unittest.TestCase):
                         "Not written to file",
                         log_path.read_text(encoding="utf-8"),
                     )
+            finally:
+                root.destroy()
+
+    def test_enter_sends_and_control_enter_inserts_newline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root_path = Path(temporary_directory)
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                with (
+                    patch("src.app.SETTINGS_DATABASE", root_path / "settings.sqlite3"),
+                    patch("src.app.APP_DATA_DIR", root_path),
+                ):
+                    app = DeepbridCodeApp(root)
+                    with patch.object(app, "_send") as send:
+                        self.assertEqual(app._send_on_return(SimpleNamespace()), "break")
+                    send.assert_called_once_with()
+
+                    app.message.insert("1.0", "first")
+                    app.message.mark_set("insert", "end-1c")
+                    self.assertEqual(
+                        app._insert_message_newline(SimpleNamespace(widget=app.message)),
+                        "break",
+                    )
+                    app.message.insert("insert", "second")
+                    self.assertEqual(app.message.get("1.0", "end-1c"), "first\nsecond")
             finally:
                 root.destroy()
 
